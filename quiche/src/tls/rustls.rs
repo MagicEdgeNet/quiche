@@ -408,6 +408,19 @@ impl Handshake {
     }
 
     fn build_server_connection(&self) -> Result<::rustls::quic::Connection> {
+        let config = self.build_server_config()?;
+
+        let conn = ::rustls::quic::ServerConnection::new(
+            Arc::new(config),
+            ::rustls::quic::Version::V1,
+            self.local_transport_params.clone(),
+        )
+        .map_err(|_| Error::TlsFail)?;
+
+        Ok(conn.into())
+    }
+
+    fn build_server_config(&self) -> Result<::rustls::ServerConfig> {
         let certificate_identity = self
             .certificate_identity
             .as_ref()
@@ -460,16 +473,15 @@ impl Handshake {
             true => u32::MAX,
             false => 0,
         };
+        config.ticketer = Some(
+            self.provider
+                .ticketer_factory
+                .ticketer()
+                .map_err(|_| Error::TlsFail)?,
+        );
         self.set_keylog(&mut config.key_log);
 
-        let conn = ::rustls::quic::ServerConnection::new(
-            Arc::new(config),
-            ::rustls::quic::Version::V1,
-            self.local_transport_params.clone(),
-        )
-        .map_err(|_| Error::TlsFail)?;
-
-        Ok(conn.into())
+        Ok(config)
     }
 
     fn set_keylog(&self, key_log: &mut Arc<dyn ::rustls::KeyLog>) {
@@ -1143,6 +1155,14 @@ mod tests {
             handshake_from_context(server_ctx, true);
 
         assert!(server.build_server_connection().is_ok());
+    }
+
+    #[test]
+    fn server_config_enables_stateless_tickets() {
+        let (server, _server_crypto_ctx) = handshake(true);
+        let config = server.build_server_config().unwrap();
+
+        assert!(config.ticketer.is_some());
     }
 
     #[test]
