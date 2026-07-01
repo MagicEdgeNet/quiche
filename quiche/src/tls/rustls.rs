@@ -308,7 +308,10 @@ impl Handshake {
     }
 
     pub fn clear(&mut self) -> Result<()> {
-        Err(Error::TlsFail)
+        self.conn = None;
+        self.write_level = crypto::Level::Initial;
+
+        Ok(())
     }
 
     pub fn set_session(&mut self, _session: &[u8]) -> Result<()> {
@@ -923,6 +926,51 @@ mod tests {
 
         assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
         assert!(ex_data.crypto_ctx[packet::Epoch::Initial].data_available());
+    }
+
+    #[test]
+    fn handshake_clear_restarts_client_initial() {
+        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config =
+            crate::recovery::RecoveryConfig::from_config(&config);
+        let application_protos = vec![b"h3".to_vec()];
+        let mut session = None;
+        let mut local_error = None;
+        let (mut handshake, mut crypto_ctx) = handshake(false);
+
+        {
+            let mut ex_data = ex_data(
+                &mut crypto_ctx,
+                false,
+                &application_protos,
+                &mut session,
+                &mut local_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
+        }
+
+        assert_eq!(handshake.write_level(), crypto::Level::Initial);
+        assert!(!drain_crypto(&mut crypto_ctx, packet::Epoch::Initial).is_empty());
+
+        handshake.clear().unwrap();
+
+        {
+            let mut ex_data = ex_data(
+                &mut crypto_ctx,
+                false,
+                &application_protos,
+                &mut session,
+                &mut local_error,
+                recovery_config,
+                config.tx_cap_factor,
+            );
+            assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
+        }
+
+        assert_eq!(handshake.write_level(), crypto::Level::Initial);
+        assert!(!drain_crypto(&mut crypto_ctx, packet::Epoch::Initial).is_empty());
     }
 
     #[test]
