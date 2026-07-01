@@ -24,14 +24,22 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use ::rustls::client::ClientSessionKey;
+use ::rustls::client::ClientSessionStore;
+use ::rustls::client::Tls12ClientSessionValue;
+use ::rustls::client::Tls13ClientSessionValue;
+use ::rustls::crypto::kx::NamedGroup;
 use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
 use ::rustls::crypto::Identity;
@@ -52,6 +60,7 @@ use aws_lc_rs::cipher::AES_128;
 use aws_lc_rs::cipher::AES_CBC_IV_LEN;
 use aws_lc_rs::hmac;
 use aws_lc_rs::iv;
+use aws_lc_rs::rand;
 
 use crate::crypto;
 use crate::packet;
@@ -108,6 +117,7 @@ impl Context {
             write_level: crypto::Level::Initial,
             early_data_active: false,
             signature_scheme: Arc::new(Mutex::new(None)),
+            session_store: Arc::new(QuicheClientSessionStore::new()),
         })
     }
 
@@ -216,6 +226,7 @@ pub struct Handshake {
     write_level: crypto::Level,
     early_data_active: bool,
     signature_scheme: Arc<Mutex<Option<SignatureScheme>>>,
+    session_store: Arc<QuicheClientSessionStore>,
 }
 
 impl Handshake {
@@ -282,6 +293,7 @@ impl Handshake {
         self.sync_ex_data(ex_data);
         self.flush_handshake_data(ex_data)?;
         self.flush_keylog(ex_data);
+        self.flush_session(ex_data);
 
         match self.is_completed() {
             true => Ok(()),
@@ -291,6 +303,7 @@ impl Handshake {
 
     pub fn process_post_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
         self.flush_keylog(ex_data);
+        self.flush_session(ex_data);
 
         Ok(())
     }
@@ -340,8 +353,8 @@ impl Handshake {
         Ok(())
     }
 
-    pub fn set_session(&mut self, _session: &[u8]) -> Result<()> {
-        Err(Error::TlsFail)
+    pub fn set_session(&mut self, session: &[u8]) -> Result<()> {
+        self.session_store.import_session(session)
     }
 
     pub fn curve(&self) -> Option<String> {
@@ -437,6 +450,8 @@ impl Handshake {
             .cloned()
             .map(::rustls::enums::ApplicationProtocol::from)
             .collect();
+        config.resumption =
+            ::rustls::client::Resumption::store(self.session_store.clone());
         config.enable_early_data = self.early_data_enabled;
         self.set_keylog(&mut config.key_log);
 
@@ -580,6 +595,12 @@ impl Handshake {
         }
     }
 
+    fn flush_session(&self, ex_data: &mut ExData) {
+        if let Some(session) = self.session_store.take_exported_session() {
+            *ex_data.session = Some(session);
+        }
+    }
+
     fn sync_ex_data(&mut self, ex_data: &ExData) {
         if self.alpn_protocols != *ex_data.application_protos {
             self.alpn_protocols = ex_data.application_protos.clone();
@@ -592,8 +613,30 @@ impl Handshake {
 
         loop {
             let mut buf = Vec::new();
-            let key_change = self.connection()?.write_hs(&mut buf);
+            let mut key_change = self.connection()?.write_hs(&mut buf);
+            let mut consumed_key_change = false;
             self.install_zero_rtt_keys(ex_data);
+
+            if matches!(
+                key_change,
+                Some(::rustls::quic::KeyChange::Handshake { .. })
+            ) && self.write_level == crypto::Level::Initial &&
+                !ex_data.is_server
+            {
+                let Some(::rustls::quic::KeyChange::Handshake { keys }) =
+                    key_change.take()
+                else {
+                    unreachable!();
+                };
+
+                ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_open =
+                    Some(crypto::Open::from_rustls(keys.remote, None));
+                ex_data.crypto_ctx[packet::Epoch::Handshake].crypto_seal =
+                    Some(crypto::Seal::from_rustls(keys.local, None));
+
+                self.write_level = crypto::Level::Handshake;
+                consumed_key_change = true;
+            }
 
             if !buf.is_empty() {
                 let space = match self.write_level {
@@ -638,6 +681,8 @@ impl Handshake {
                     self.write_level = crypto::Level::OneRTT;
                     self.early_data_active = false;
                 },
+
+                None if consumed_key_change => continue,
 
                 None => break,
             }
@@ -787,6 +832,188 @@ impl ::rustls::KeyLog for QuicheKeyLog {
 
         writeln!(lines).ok();
     }
+}
+
+const RUSTLS_SESSION_TOKEN_LEN: usize = 16;
+const MAX_RUSTLS_SESSIONS: usize = 1024;
+const MAX_TLS13_TICKETS_PER_SERVER: usize = 8;
+
+type RustlsSessionToken = [u8; RUSTLS_SESSION_TOKEN_LEN];
+
+struct RegisteredRustlsSession {
+    key: ClientSessionKey<'static>,
+    value: Tls13ClientSessionValue,
+}
+
+static RUSTLS_SESSION_REGISTRY: OnceLock<
+    Mutex<HashMap<RustlsSessionToken, RegisteredRustlsSession>>,
+> = OnceLock::new();
+
+fn rustls_session_registry(
+) -> &'static Mutex<HashMap<RustlsSessionToken, RegisteredRustlsSession>> {
+    RUSTLS_SESSION_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Default)]
+struct ClientSessionData {
+    kx_hint: Option<NamedGroup>,
+    tls12: Option<Tls12ClientSessionValue>,
+    tls13: VecDeque<Tls13ClientSessionValue>,
+}
+
+#[derive(Default)]
+struct QuicheClientSessionStore {
+    sessions: Mutex<HashMap<ClientSessionKey<'static>, ClientSessionData>>,
+    exported_session: Mutex<Option<Vec<u8>>>,
+}
+
+impl QuicheClientSessionStore {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn import_session(&self, session: &[u8]) -> Result<()> {
+        if session.len() != RUSTLS_SESSION_TOKEN_LEN {
+            return Err(Error::TlsFail);
+        }
+
+        let mut token = [0; RUSTLS_SESSION_TOKEN_LEN];
+        token.copy_from_slice(session);
+
+        let registered = rustls_session_registry()
+            .lock()
+            .map_err(|_| Error::TlsFail)?
+            .remove(&token)
+            .ok_or(Error::TlsFail)?;
+
+        self.insert_imported_tls13_ticket(registered.key, registered.value);
+
+        Ok(())
+    }
+
+    fn take_exported_session(&self) -> Option<Vec<u8>> {
+        self.exported_session.lock().ok()?.take()
+    }
+
+    fn export_tls13_ticket(
+        &self, key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+    ) {
+        let peer_params = value.quic_params();
+        let Some(token) = register_rustls_session(key, value) else {
+            return;
+        };
+
+        if let Ok(mut session) = self.exported_session.lock() {
+            *session = Some(encode_quiche_session(&token, &peer_params));
+        }
+    }
+
+    fn insert_imported_tls13_ticket(
+        &self, key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+    ) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            let session = sessions.entry(key).or_default();
+            if session.tls13.len() == MAX_TLS13_TICKETS_PER_SERVER {
+                session.tls13.pop_front();
+            }
+
+            session.tls13.push_back(value);
+        }
+    }
+}
+
+impl fmt::Debug for QuicheClientSessionStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuicheClientSessionStore")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClientSessionStore for QuicheClientSessionStore {
+    fn set_kx_hint(&self, key: ClientSessionKey<'static>, group: NamedGroup) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.entry(key).or_default().kx_hint = Some(group);
+        }
+    }
+
+    fn kx_hint(&self, key: &ClientSessionKey<'_>) -> Option<NamedGroup> {
+        self.sessions
+            .lock()
+            .ok()?
+            .get(key)
+            .and_then(|session| session.kx_hint)
+    }
+
+    fn set_tls12_session(
+        &self, key: ClientSessionKey<'static>, value: Tls12ClientSessionValue,
+    ) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.entry(key).or_default().tls12 = Some(value);
+        }
+    }
+
+    fn tls12_session(
+        &self, key: &ClientSessionKey<'_>,
+    ) -> Option<Tls12ClientSessionValue> {
+        self.sessions
+            .lock()
+            .ok()?
+            .get(key)
+            .and_then(|session| session.tls12.as_ref().cloned())
+    }
+
+    fn remove_tls12_session(&self, key: &ClientSessionKey<'static>) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            if let Some(session) = sessions.get_mut(key) {
+                session.tls12 = None;
+            }
+        }
+    }
+
+    fn insert_tls13_ticket(
+        &self, key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+    ) {
+        self.export_tls13_ticket(key, value);
+    }
+
+    fn take_tls13_ticket(
+        &self, key: &ClientSessionKey<'static>,
+    ) -> Option<Tls13ClientSessionValue> {
+        self.sessions
+            .lock()
+            .ok()?
+            .get_mut(key)
+            .and_then(|session| session.tls13.pop_back())
+    }
+}
+
+fn register_rustls_session(
+    key: ClientSessionKey<'static>, value: Tls13ClientSessionValue,
+) -> Option<RustlsSessionToken> {
+    let mut token = [0; RUSTLS_SESSION_TOKEN_LEN];
+    rand::fill(&mut token).ok()?;
+
+    let mut registry = rustls_session_registry().lock().ok()?;
+    if registry.len() >= MAX_RUSTLS_SESSIONS {
+        let first_key = *registry.keys().next()?;
+        registry.remove(&first_key);
+    }
+
+    registry.insert(token, RegisteredRustlsSession { key, value });
+
+    Some(token)
+}
+
+fn encode_quiche_session(session: &[u8], peer_params: &[u8]) -> Vec<u8> {
+    let mut buffer =
+        Vec::with_capacity(8 + session.len() + 8 + peer_params.len());
+
+    buffer.extend_from_slice(&(session.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(session);
+    buffer.extend_from_slice(&(peer_params.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(peer_params);
+
+    buffer
 }
 
 const TICKET_KEY_LEN: usize = 48;
@@ -1327,6 +1554,15 @@ mod tests {
         data
     }
 
+    fn drain_crypto_if_available(
+        crypto_ctx: &mut [packet::CryptoContext; 3], epoch: packet::Epoch,
+    ) -> Vec<u8> {
+        match crypto_ctx[epoch].data_available() {
+            true => drain_crypto(crypto_ctx, epoch),
+            false => Vec::new(),
+        }
+    }
+
     fn example_cert_chain() -> Vec<Vec<u8>> {
         CertificateDer::pem_file_iter(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1335,6 +1571,156 @@ mod tests {
         .unwrap()
         .map(|cert| cert.unwrap().as_ref().to_vec())
         .collect()
+    }
+
+    fn server_context_with_ticket_key() -> Context {
+        let mut server_ctx = Context::new().unwrap();
+        server_ctx.set_verify(false);
+        server_ctx.set_alpn(&[b"h3"]).unwrap();
+        server_ctx.use_certificate_chain_file(EXAMPLE_CERT).unwrap();
+        server_ctx.use_privkey_file(EXAMPLE_KEY).unwrap();
+        server_ctx.set_ticket_key(&[0x0a; TICKET_KEY_LEN]).unwrap();
+
+        server_ctx
+    }
+
+    fn drive_full_handshake(
+        client: &mut Handshake,
+        client_crypto_ctx: &mut [packet::CryptoContext; 3],
+        server: &mut Handshake,
+        server_crypto_ctx: &mut [packet::CryptoContext; 3],
+    ) -> Option<Vec<u8>> {
+        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config =
+            crate::recovery::RecoveryConfig::from_config(&config);
+        let application_protos = vec![b"h3".to_vec()];
+        let mut client_session = None;
+        let mut server_session = None;
+        let mut client_error = None;
+        let mut server_error = None;
+
+        {
+            let mut client_ex_data = ex_data(
+                client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        let client_initial =
+            drain_crypto(client_crypto_ctx, packet::Epoch::Initial);
+        server
+            .provide_data(crypto::Level::Initial, &client_initial)
+            .unwrap();
+
+        let mut server_application = Vec::new();
+
+        {
+            let mut server_ex_data = ex_data(
+                server_crypto_ctx,
+                true,
+                &application_protos,
+                &mut server_session,
+                &mut server_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                server.do_handshake(&mut server_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        let server_initial =
+            drain_crypto(server_crypto_ctx, packet::Epoch::Initial);
+        let server_handshake =
+            drain_crypto(server_crypto_ctx, packet::Epoch::Handshake);
+        server_application.extend_from_slice(&drain_crypto_if_available(
+            server_crypto_ctx,
+            packet::Epoch::Application,
+        ));
+
+        client
+            .provide_data(crypto::Level::Initial, &server_initial)
+            .unwrap();
+        client
+            .provide_data(crypto::Level::Handshake, &server_handshake)
+            .unwrap();
+
+        {
+            let mut client_ex_data = ex_data(
+                client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+        }
+
+        let client_handshake = drain_crypto_if_available(
+            client_crypto_ctx,
+            packet::Epoch::Handshake,
+        );
+        if !client_handshake.is_empty() {
+            server
+                .provide_data(crypto::Level::Handshake, &client_handshake)
+                .unwrap();
+
+            let mut server_ex_data = ex_data(
+                server_crypto_ctx,
+                true,
+                &application_protos,
+                &mut server_session,
+                &mut server_error,
+                recovery_config.clone(),
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                server.do_handshake(&mut server_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+            server_application.extend_from_slice(&drain_crypto_if_available(
+                server_crypto_ctx,
+                packet::Epoch::Application,
+            ));
+        }
+
+        if !server_application.is_empty() {
+            client
+                .provide_data(crypto::Level::OneRTT, &server_application)
+                .unwrap();
+
+            let mut client_ex_data = ex_data(
+                client_crypto_ctx,
+                false,
+                &application_protos,
+                &mut client_session,
+                &mut client_error,
+                recovery_config,
+                config.tx_cap_factor,
+            );
+            assert!(matches!(
+                client.do_handshake(&mut client_ex_data),
+                Ok(()) | Err(Error::Done)
+            ));
+            client.process_post_handshake(&mut client_ex_data).unwrap();
+        }
+
+        client_session
     }
 
     #[test]
@@ -1585,12 +1971,7 @@ mod tests {
 
     #[test]
     fn set_ticket_key_configures_fixed_ticket_producer() {
-        let mut server_ctx = Context::new().unwrap();
-        server_ctx.set_verify(false);
-        server_ctx.set_alpn(&[b"h3"]).unwrap();
-        server_ctx.use_certificate_chain_file(EXAMPLE_CERT).unwrap();
-        server_ctx.use_privkey_file(EXAMPLE_KEY).unwrap();
-        server_ctx.set_ticket_key(&[0x0a; TICKET_KEY_LEN]).unwrap();
+        let server_ctx = server_context_with_ticket_key();
 
         let (server, _server_crypto_ctx) =
             handshake_from_context(server_ctx, true);
@@ -1604,6 +1985,44 @@ mod tests {
         let mut wrong_key_name = ciphertext;
         wrong_key_name[0] ^= 0x01;
         assert!(ticketer.decrypt(&wrong_key_name).is_none());
+    }
+
+    #[test]
+    fn client_session_token_can_resume_handshake() {
+        let (mut client, mut client_crypto_ctx) = handshake(false);
+        let (mut server, mut server_crypto_ctx) =
+            handshake_from_context(server_context_with_ticket_key(), true);
+
+        let session = drive_full_handshake(
+            &mut client,
+            &mut client_crypto_ctx,
+            &mut server,
+            &mut server_crypto_ctx,
+        )
+        .unwrap();
+        let mut session_buf = octets::Octets::with_slice(&session);
+        let token_len = session_buf.get_u64().unwrap() as usize;
+        let token = session_buf.get_bytes(token_len).unwrap();
+        let params_len = session_buf.get_u64().unwrap() as usize;
+        let params = session_buf.get_bytes(params_len).unwrap();
+
+        assert_eq!(token_len, RUSTLS_SESSION_TOKEN_LEN);
+        assert!(!params.is_empty());
+
+        let (mut resumed_client, mut resumed_client_crypto_ctx) =
+            handshake(false);
+        resumed_client.set_session(token.as_ref()).unwrap();
+        let (mut resumed_server, mut resumed_server_crypto_ctx) =
+            handshake_from_context(server_context_with_ticket_key(), true);
+
+        drive_full_handshake(
+            &mut resumed_client,
+            &mut resumed_client_crypto_ctx,
+            &mut resumed_server,
+            &mut resumed_server_crypto_ctx,
+        );
+
+        assert!(resumed_client.is_resumed());
     }
 
     #[test]
