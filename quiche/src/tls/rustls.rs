@@ -31,6 +31,7 @@ use ::rustls::crypto::Identity;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
+use ::rustls::RootCertStore;
 
 use crate::crypto;
 use crate::packet;
@@ -42,6 +43,7 @@ pub struct Context {
     provider: Arc<::rustls::crypto::CryptoProvider>,
     certificate_identity: Option<Arc<Identity<'static>>>,
     private_key: Option<PrivateKeyDer<'static>>,
+    root_store: RootCertStore,
     verify: bool,
     alpn_protocols: Vec<Vec<u8>>,
 }
@@ -54,6 +56,7 @@ impl Context {
             provider: Arc::new(rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER),
             certificate_identity: None,
             private_key: None,
+            root_store: RootCertStore::empty(),
             verify: true,
             alpn_protocols: Vec::new(),
         })
@@ -64,6 +67,7 @@ impl Context {
             provider: Arc::clone(&self.provider),
             certificate_identity: self.certificate_identity.clone(),
             private_key: self.private_key.as_ref().map(PrivateKeyDer::clone_key),
+            root_store: self.root_store.clone(),
             verify: self.verify,
             alpn_protocols: self.alpn_protocols.clone(),
             is_server: None,
@@ -74,8 +78,17 @@ impl Context {
         })
     }
 
-    pub fn load_verify_locations_from_file(&mut self, _file: &str) -> Result<()> {
-        Err(Error::TlsFail)
+    pub fn load_verify_locations_from_file(&mut self, file: &str) -> Result<()> {
+        let certs = CertificateDer::pem_file_iter(file)
+            .map_err(|_| Error::TlsFail)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::TlsFail)?;
+        let (valid, _invalid) = self.root_store.add_parsable_certificates(certs);
+
+        match valid {
+            0 => Err(Error::TlsFail),
+            _ => Ok(()),
+        }
     }
 
     pub fn load_verify_locations_from_directory(
@@ -127,6 +140,7 @@ pub struct Handshake {
     provider: Arc<::rustls::crypto::CryptoProvider>,
     certificate_identity: Option<Arc<Identity<'static>>>,
     private_key: Option<PrivateKeyDer<'static>>,
+    root_store: RootCertStore,
     verify: bool,
     alpn_protocols: Vec<Vec<u8>>,
     is_server: Option<bool>,
@@ -290,7 +304,16 @@ impl Handshake {
             .to_owned();
 
         let mut config = match self.verify {
-            true => return Err(Error::TlsFail),
+            true => {
+                if self.root_store.is_empty() {
+                    return Err(Error::TlsFail);
+                }
+
+                ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
+                    .with_root_certificates(Arc::new(self.root_store.clone()))
+                    .with_no_client_auth()
+                    .map_err(|_| Error::TlsFail)?
+            },
 
             false => ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
                 .dangerous()
@@ -539,6 +562,42 @@ mod tests {
 
         assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
         assert!(ex_data.crypto_ctx[packet::Epoch::Initial].data_available());
+    }
+
+    #[test]
+    fn client_verification_requires_loaded_roots() {
+        let mut ctx = Context::new().unwrap();
+
+        let mut handshake = ctx.new_handshake().unwrap();
+        handshake.init(false).unwrap();
+        handshake.set_host_name("example.com").unwrap();
+        handshake
+            .set_quic_transport_params(&crate::TransportParams::default(), false)
+            .unwrap();
+
+        assert!(matches!(
+            handshake.build_client_connection(),
+            Err(Error::TlsFail)
+        ));
+    }
+
+    #[test]
+    fn client_context_loads_verify_roots() {
+        let mut ctx = Context::new().unwrap();
+        ctx.load_verify_locations_from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/rootca.crt"
+        ))
+        .unwrap();
+
+        let mut handshake = ctx.new_handshake().unwrap();
+        handshake.init(false).unwrap();
+        handshake.set_host_name("example.com").unwrap();
+        handshake
+            .set_quic_transport_params(&crate::TransportParams::default(), false)
+            .unwrap();
+
+        assert!(handshake.build_client_connection().is_ok());
     }
 
     #[test]
