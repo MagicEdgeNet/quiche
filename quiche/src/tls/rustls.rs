@@ -35,6 +35,8 @@ use crate::Result;
 
 pub struct Context {
     provider: Arc<::rustls::crypto::CryptoProvider>,
+    verify: bool,
+    alpn_protocols: Vec<Vec<u8>>,
 }
 
 impl Context {
@@ -43,13 +45,21 @@ impl Context {
 
         Ok(Context {
             provider: Arc::new(rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER),
+            verify: true,
+            alpn_protocols: Vec::new(),
         })
     }
 
     pub fn new_handshake(&mut self) -> Result<Handshake> {
         Ok(Handshake {
             provider: Arc::clone(&self.provider),
+            verify: self.verify,
+            alpn_protocols: self.alpn_protocols.clone(),
+            is_server: None,
+            server_name: None,
             local_transport_params: Vec::new(),
+            conn: None,
+            write_level: crypto::Level::Initial,
         })
     }
 
@@ -71,11 +81,15 @@ impl Context {
         Err(Error::TlsFail)
     }
 
-    pub fn set_verify(&mut self, _verify: bool) {}
+    pub fn set_verify(&mut self, verify: bool) {
+        self.verify = verify;
+    }
 
     pub fn enable_keylog(&mut self) {}
 
-    pub fn set_alpn(&mut self, _v: &[&[u8]]) -> Result<()> {
+    pub fn set_alpn(&mut self, v: &[&[u8]]) -> Result<()> {
+        self.alpn_protocols = v.iter().map(|proto| proto.to_vec()).collect();
+
         Ok(())
     }
 
@@ -88,20 +102,28 @@ impl Context {
 
 pub struct Handshake {
     provider: Arc<::rustls::crypto::CryptoProvider>,
+    verify: bool,
+    alpn_protocols: Vec<Vec<u8>>,
+    is_server: Option<bool>,
+    server_name: Option<String>,
     local_transport_params: Vec<u8>,
+    conn: Option<::rustls::quic::Connection>,
+    write_level: crypto::Level,
 }
 
 impl Handshake {
-    pub fn init(&mut self, _is_server: bool) -> Result<()> {
-        let _ = &self.provider;
+    pub fn init(&mut self, is_server: bool) -> Result<()> {
+        self.is_server = Some(is_server);
 
         Ok(())
     }
 
     pub fn use_legacy_codepoint(&mut self, _use_legacy: bool) {}
 
-    pub fn set_host_name(&mut self, _name: &str) -> Result<()> {
-        Err(Error::TlsFail)
+    pub fn set_host_name(&mut self, name: &str) -> Result<()> {
+        self.server_name = Some(name.to_string());
+
+        Ok(())
     }
 
     pub fn set_quic_transport_params(
@@ -119,27 +141,44 @@ impl Handshake {
     }
 
     pub fn quic_transport_params(&self) -> &[u8] {
-        &[]
+        self.conn
+            .as_ref()
+            .and_then(|conn| conn.quic_transport_parameters())
+            .unwrap_or(&[])
     }
 
     pub fn alpn_protocol(&self) -> &[u8] {
-        &[]
+        self.conn
+            .as_ref()
+            .and_then(|conn| conn.alpn_protocol())
+            .map(|proto| proto.as_ref())
+            .unwrap_or(&[])
     }
 
     pub fn server_name(&self) -> Option<&str> {
-        None
+        match &self.conn {
+            Some(::rustls::quic::Connection::Server(conn)) =>
+                conn.server_name().map(|name| name.as_ref()),
+
+            _ => self.server_name.as_deref(),
+        }
     }
 
     pub fn provide_data(
-        &mut self, _level: crypto::Level, _buf: &[u8],
+        &mut self, _level: crypto::Level, buf: &[u8],
     ) -> Result<()> {
-        Err(Error::TlsFail)
+        self.connection()?.read_hs(buf).map_err(|_| Error::TlsFail)
     }
 
     pub fn do_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
         observe_ex_data(ex_data);
+        self.sync_ex_data(ex_data);
+        self.flush_handshake_data(ex_data)?;
 
-        Err(Error::TlsFail)
+        match self.is_completed() {
+            true => Ok(()),
+            false => Err(Error::Done),
+        }
     }
 
     pub fn process_post_handshake(
@@ -149,7 +188,7 @@ impl Handshake {
     }
 
     pub fn write_level(&self) -> crypto::Level {
-        crypto::Level::Initial
+        self.write_level
     }
 
     pub fn cipher(&self) -> Option<crypto::Algorithm> {
@@ -160,7 +199,9 @@ impl Handshake {
     pub fn set_options(&mut self, _opts: u32) {}
 
     pub fn is_completed(&self) -> bool {
-        false
+        self.conn
+            .as_ref()
+            .is_some_and(|conn| !conn.is_handshaking())
     }
 
     pub fn is_resumed(&self) -> bool {
@@ -201,6 +242,165 @@ impl Handshake {
     pub fn early_data_reason(&self) -> u32 {
         0
     }
+
+    fn connection(&mut self) -> Result<&mut ::rustls::quic::Connection> {
+        if self.conn.is_none() {
+            self.conn = Some(self.build_connection()?);
+        }
+
+        Ok(self.conn.as_mut().expect("connection was just initialized"))
+    }
+
+    fn build_connection(&self) -> Result<::rustls::quic::Connection> {
+        match self.is_server.ok_or(Error::TlsFail)? {
+            true => self.build_server_connection(),
+            false => self.build_client_connection(),
+        }
+    }
+
+    fn build_client_connection(&self) -> Result<::rustls::quic::Connection> {
+        let server_name = self.server_name.as_deref().ok_or(Error::TlsFail)?;
+        let server_name = ::rustls::pki_types::ServerName::try_from(server_name)
+            .map_err(|_| Error::TlsFail)?
+            .to_owned();
+
+        let mut config = match self.verify {
+            true => return Err(Error::TlsFail),
+
+            false => ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(
+                    NoCertificateVerification::new(&self.provider),
+                ))
+                .with_no_client_auth()
+                .map_err(|_| Error::TlsFail)?,
+        };
+
+        config.alpn_protocols = self
+            .alpn_protocols
+            .iter()
+            .cloned()
+            .map(::rustls::enums::ApplicationProtocol::from)
+            .collect();
+
+        let conn = ::rustls::quic::ClientConnection::new(
+            Arc::new(config),
+            ::rustls::quic::Version::V1,
+            server_name,
+            self.local_transport_params.clone(),
+        )
+        .map_err(|_| Error::TlsFail)?;
+
+        Ok(conn.into())
+    }
+
+    fn build_server_connection(&self) -> Result<::rustls::quic::Connection> {
+        Err(Error::TlsFail)
+    }
+
+    fn sync_ex_data(&mut self, ex_data: &ExData) {
+        if self.alpn_protocols != *ex_data.application_protos {
+            self.alpn_protocols = ex_data.application_protos.clone();
+        }
+    }
+
+    fn flush_handshake_data(&mut self, ex_data: &mut ExData) -> Result<()> {
+        loop {
+            let mut buf = Vec::new();
+            let key_change = self.connection()?.write_hs(&mut buf);
+
+            if !buf.is_empty() {
+                let space = match self.write_level {
+                    crypto::Level::Initial =>
+                        &mut ex_data.crypto_ctx[packet::Epoch::Initial],
+
+                    crypto::Level::ZeroRTT => unreachable!(),
+
+                    crypto::Level::Handshake =>
+                        &mut ex_data.crypto_ctx[packet::Epoch::Handshake],
+
+                    crypto::Level::OneRTT =>
+                        &mut ex_data.crypto_ctx[packet::Epoch::Application],
+                };
+
+                space
+                    .crypto_stream
+                    .send
+                    .write(&buf, false)
+                    .map_err(|_| Error::TlsFail)?;
+            }
+
+            match key_change {
+                Some(::rustls::quic::KeyChange::Handshake { .. }) => {
+                    self.write_level = crypto::Level::Handshake;
+                },
+
+                Some(::rustls::quic::KeyChange::OneRtt { .. }) => {
+                    self.write_level = crypto::Level::OneRTT;
+                },
+
+                None => break,
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct NoCertificateVerification {
+    supported_schemes: Vec<::rustls::crypto::SignatureScheme>,
+}
+
+impl NoCertificateVerification {
+    fn new(provider: &::rustls::crypto::CryptoProvider) -> Self {
+        Self {
+            supported_schemes: provider
+                .signature_verification_algorithms
+                .supported_schemes(),
+        }
+    }
+}
+
+impl ::rustls::client::danger::ServerVerifier for NoCertificateVerification {
+    fn verify_identity(
+        &self, _identity: &::rustls::client::danger::ServerIdentity,
+    ) -> std::result::Result<
+        ::rustls::client::danger::PeerVerified,
+        ::rustls::Error,
+    > {
+        Ok(::rustls::client::danger::PeerVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self, _input: &::rustls::client::danger::SignatureVerificationInput,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        Ok(::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self, _input: &::rustls::client::danger::SignatureVerificationInput,
+    ) -> std::result::Result<
+        ::rustls::client::danger::HandshakeSignatureValid,
+        ::rustls::Error,
+    > {
+        Ok(::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<::rustls::crypto::SignatureScheme> {
+        self.supported_schemes.clone()
+    }
+
+    fn request_ocsp_response(&self) -> bool {
+        false
+    }
+
+    fn hash_config(&self, h: &mut dyn std::hash::Hasher) {
+        h.write(b"quiche-rustls-no-certificate-verification");
+    }
 }
 
 pub struct ExData<'a> {
@@ -235,15 +435,56 @@ fn keep_crypto_symbols_live() {
 }
 
 fn observe_ex_data(ex_data: &mut ExData) {
-    let _ = ex_data.application_protos.len();
-    let _ = ex_data.crypto_ctx.len();
     let _ = ex_data.session.is_some();
     let _ = ex_data.local_error.is_some();
     let _ = ex_data.keylog.is_some();
     let _ = ex_data.trace_id.len();
-    let _ = &ex_data.local_transport_params;
-    let _ = ex_data.recovery_config;
-    let _ = ex_data.tx_cap_factor;
-    let _ = ex_data.pmtud;
     let _ = ex_data.is_server;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_handshake_emits_initial_crypto() {
+        let mut ctx = Context::new().unwrap();
+        ctx.set_verify(false);
+        ctx.set_alpn(&[b"h3"]).unwrap();
+
+        let mut handshake = ctx.new_handshake().unwrap();
+        handshake.init(false).unwrap();
+        handshake.set_host_name("example.com").unwrap();
+        handshake
+            .set_quic_transport_params(&crate::TransportParams::default(), false)
+            .unwrap();
+
+        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config =
+            crate::recovery::RecoveryConfig::from_config(&config);
+        let mut crypto_ctx = [
+            packet::CryptoContext::new(),
+            packet::CryptoContext::new(),
+            packet::CryptoContext::new(),
+        ];
+        let mut session = None;
+        let mut local_error = None;
+        let application_protos = vec![b"h3".to_vec()];
+        let mut ex_data = ExData {
+            application_protos: &application_protos,
+            crypto_ctx: &mut crypto_ctx,
+            session: &mut session,
+            local_error: &mut local_error,
+            keylog: None,
+            trace_id: "",
+            local_transport_params: crate::TransportParams::default(),
+            recovery_config,
+            tx_cap_factor: config.tx_cap_factor,
+            pmtud: None,
+            is_server: false,
+        };
+
+        assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
+        assert!(ex_data.crypto_ctx[packet::Epoch::Initial].data_available());
+    }
 }
