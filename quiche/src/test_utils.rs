@@ -356,6 +356,17 @@ impl<F: BufFactory> Pipe<F> {
         self.server.recv(buf, info)
     }
 
+    pub fn client_send_remaining_initial(
+        &mut self, buf: &mut [u8],
+    ) -> Result<()> {
+        while self.client.crypto_ctx[packet::Epoch::Initial].data_available() {
+            let (len, _) = self.client.send(buf)?;
+            self.server_recv(&mut buf[..len])?;
+        }
+
+        Ok(())
+    }
+
     pub fn send_pkt_to_server(
         &mut self, pkt_type: Type, frames: &[frame::Frame], buf: &mut [u8],
     ) -> Result<usize> {

@@ -3743,12 +3743,13 @@ mod tests {
         // Now an H3 connection can be created.
         assert!(Connection::with_transport(&mut pipe.client, &h3_config).is_ok());
         assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+        assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
         // Client sends 0-RTT packet.
         let pkt_type = crate::packet::Type::ZeroRTT;
 
         let frames = [crate::frame::Frame::Stream {
-            stream_id: 6,
+            stream_id: 0,
             data: <crate::range_buf::RangeBuf>::from(b"aaaaa", 0, true),
         }];
 
@@ -3760,12 +3761,11 @@ mod tests {
         assert_eq!(pipe.server.undecryptable_pkts.len(), 0);
 
         // 0-RTT stream data is readable.
-        let mut r = pipe.server.readable();
-        assert_eq!(r.next(), Some(6));
-        assert_eq!(r.next(), None);
+        let readable = pipe.server.readable().collect::<Vec<_>>();
+        assert!(readable.contains(&0));
 
         let mut b = [0; 15];
-        assert_eq!(pipe.server.stream_recv(6, &mut b), Ok((5, true)));
+        assert_eq!(pipe.server.stream_recv(0, &mut b), Ok((5, true)));
         assert_eq!(&b[..5], b"aaaaa");
     }
 

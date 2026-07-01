@@ -668,6 +668,7 @@ fn handshake_0rtt(
     // Client sends initial flight.
     let (len, _) = pipe.client.send(&mut buf).unwrap();
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
     // Client sends 0-RTT packet.
     let pkt_type = Type::ZeroRTT;
@@ -757,6 +758,7 @@ fn handshake_0rtt_reordered(
 
     // Initial packet is also received.
     assert_eq!(pipe.server_recv(&mut initial), Ok(initial.len()));
+    assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
     // 0-RTT stream data is readable.
     let mut r = pipe.server.readable();
