@@ -27,6 +27,11 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use ::rustls::crypto::Identity;
+use ::rustls::pki_types::pem::PemObject;
+use ::rustls::pki_types::CertificateDer;
+use ::rustls::pki_types::PrivateKeyDer;
+
 use crate::crypto;
 use crate::packet;
 use crate::ConnectionError;
@@ -35,6 +40,8 @@ use crate::Result;
 
 pub struct Context {
     provider: Arc<::rustls::crypto::CryptoProvider>,
+    certificate_identity: Option<Arc<Identity<'static>>>,
+    private_key: Option<PrivateKeyDer<'static>>,
     verify: bool,
     alpn_protocols: Vec<Vec<u8>>,
 }
@@ -45,6 +52,8 @@ impl Context {
 
         Ok(Context {
             provider: Arc::new(rustls_aws_lc_rs::DEFAULT_TLS13_PROVIDER),
+            certificate_identity: None,
+            private_key: None,
             verify: true,
             alpn_protocols: Vec::new(),
         })
@@ -53,6 +62,8 @@ impl Context {
     pub fn new_handshake(&mut self) -> Result<Handshake> {
         Ok(Handshake {
             provider: Arc::clone(&self.provider),
+            certificate_identity: self.certificate_identity.clone(),
+            private_key: self.private_key.as_ref().map(PrivateKeyDer::clone_key),
             verify: self.verify,
             alpn_protocols: self.alpn_protocols.clone(),
             is_server: None,
@@ -73,12 +84,24 @@ impl Context {
         Err(Error::TlsFail)
     }
 
-    pub fn use_certificate_chain_file(&mut self, _file: &str) -> Result<()> {
-        Err(Error::TlsFail)
+    pub fn use_certificate_chain_file(&mut self, file: &str) -> Result<()> {
+        let certs = CertificateDer::pem_file_iter(file)
+            .map_err(|_| Error::TlsFail)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::TlsFail)?;
+        let identity =
+            Identity::from_cert_chain(certs).map_err(|_| Error::TlsFail)?;
+
+        self.certificate_identity = Some(Arc::new(identity));
+
+        Ok(())
     }
 
-    pub fn use_privkey_file(&mut self, _file: &str) -> Result<()> {
-        Err(Error::TlsFail)
+    pub fn use_privkey_file(&mut self, file: &str) -> Result<()> {
+        self.private_key =
+            Some(PrivateKeyDer::from_pem_file(file).map_err(|_| Error::TlsFail)?);
+
+        Ok(())
     }
 
     pub fn set_verify(&mut self, verify: bool) {
@@ -102,6 +125,8 @@ impl Context {
 
 pub struct Handshake {
     provider: Arc<::rustls::crypto::CryptoProvider>,
+    certificate_identity: Option<Arc<Identity<'static>>>,
+    private_key: Option<PrivateKeyDer<'static>>,
     verify: bool,
     alpn_protocols: Vec<Vec<u8>>,
     is_server: Option<bool>,
@@ -295,7 +320,35 @@ impl Handshake {
     }
 
     fn build_server_connection(&self) -> Result<::rustls::quic::Connection> {
-        Err(Error::TlsFail)
+        let certificate_identity = self
+            .certificate_identity
+            .as_ref()
+            .ok_or(Error::TlsFail)?
+            .clone();
+        let private_key =
+            self.private_key.as_ref().ok_or(Error::TlsFail)?.clone_key();
+
+        let mut config =
+            ::rustls::ServerConfig::builder(Arc::clone(&self.provider))
+                .with_no_client_auth()
+                .with_single_cert(certificate_identity, private_key)
+                .map_err(|_| Error::TlsFail)?;
+
+        config.alpn_protocols = self
+            .alpn_protocols
+            .iter()
+            .cloned()
+            .map(::rustls::enums::ApplicationProtocol::from)
+            .collect();
+
+        let conn = ::rustls::quic::ServerConnection::new(
+            Arc::new(config),
+            ::rustls::quic::Version::V1,
+            self.local_transport_params.clone(),
+        )
+        .map_err(|_| Error::TlsFail)?;
+
+        Ok(conn.into())
     }
 
     fn sync_ex_data(&mut self, ex_data: &ExData) {
@@ -486,5 +539,28 @@ mod tests {
 
         assert_eq!(handshake.do_handshake(&mut ex_data), Err(Error::Done));
         assert!(ex_data.crypto_ctx[packet::Epoch::Initial].data_available());
+    }
+
+    #[test]
+    fn server_context_loads_certificate_and_private_key() {
+        let mut ctx = Context::new().unwrap();
+        ctx.use_certificate_chain_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/cert.crt"
+        ))
+        .unwrap();
+        ctx.use_privkey_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/cert.key"
+        ))
+        .unwrap();
+
+        let mut handshake = ctx.new_handshake().unwrap();
+        handshake.init(true).unwrap();
+        handshake
+            .set_quic_transport_params(&crate::TransportParams::default(), true)
+            .unwrap();
+
+        assert!(handshake.build_server_connection().is_ok());
     }
 }
