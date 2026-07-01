@@ -104,6 +104,7 @@ impl Context {
             local_transport_params: Vec::new(),
             conn: None,
             write_level: crypto::Level::Initial,
+            early_data_active: false,
         })
     }
 
@@ -210,6 +211,7 @@ pub struct Handshake {
     local_transport_params: Vec<u8>,
     conn: Option<::rustls::quic::Connection>,
     write_level: crypto::Level,
+    early_data_active: bool,
 }
 
 impl Handshake {
@@ -326,6 +328,7 @@ impl Handshake {
     pub fn clear(&mut self) -> Result<()> {
         self.conn = None;
         self.write_level = crypto::Level::Initial;
+        self.early_data_active = false;
 
         Ok(())
     }
@@ -357,7 +360,7 @@ impl Handshake {
     pub fn set_failing_private_key_method(&mut self) {}
 
     pub fn is_in_early_data(&self) -> bool {
-        false
+        self.early_data_active
     }
 
     pub fn early_data_reason(&self) -> u32 {
@@ -554,9 +557,13 @@ impl Handshake {
     }
 
     fn flush_handshake_data(&mut self, ex_data: &mut ExData) -> Result<()> {
+        self.connection()?;
+        self.install_zero_rtt_keys(ex_data);
+
         loop {
             let mut buf = Vec::new();
             let key_change = self.connection()?.write_hs(&mut buf);
+            self.install_zero_rtt_keys(ex_data);
 
             if !buf.is_empty() {
                 let space = match self.write_level {
@@ -599,6 +606,7 @@ impl Handshake {
                         Some(crypto::Seal::from_rustls(keys.local, Some(next)));
 
                     self.write_level = crypto::Level::OneRTT;
+                    self.early_data_active = false;
                 },
 
                 None => break,
@@ -606,6 +614,29 @@ impl Handshake {
         }
 
         Ok(())
+    }
+
+    fn install_zero_rtt_keys(&mut self, ex_data: &mut ExData) {
+        let Some(keys) = self.conn.as_ref().and_then(|conn| conn.zero_rtt_keys())
+        else {
+            return;
+        };
+
+        let app_crypto = &mut ex_data.crypto_ctx[packet::Epoch::Application];
+
+        if ex_data.is_server {
+            if app_crypto.crypto_0rtt_open.is_none() {
+                app_crypto.crypto_0rtt_open =
+                    Some(crypto::Open::from_rustls(keys, None));
+            }
+
+            return;
+        }
+
+        if app_crypto.crypto_seal.is_none() {
+            app_crypto.crypto_seal = Some(crypto::Seal::from_rustls(keys, None));
+            self.early_data_active = true;
+        }
     }
 }
 
@@ -1183,6 +1214,18 @@ mod tests {
 
         assert_eq!(handshake.write_level(), crypto::Level::Initial);
         assert!(!drain_crypto(&mut crypto_ctx, packet::Epoch::Initial).is_empty());
+    }
+
+    #[test]
+    fn handshake_clear_resets_early_data_state() {
+        let (mut handshake, _crypto_ctx) = handshake(false);
+        handshake.early_data_active = true;
+
+        assert!(handshake.is_in_early_data());
+
+        handshake.clear().unwrap();
+
+        assert!(!handshake.is_in_early_data());
     }
 
     #[test]
