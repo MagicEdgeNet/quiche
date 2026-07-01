@@ -27,6 +27,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use ::rustls::crypto::CipherSuite;
 use ::rustls::crypto::Credentials;
 use ::rustls::crypto::Identity;
 use ::rustls::crypto::SingleCredential;
@@ -34,6 +35,7 @@ use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
 use ::rustls::RootCertStore;
+use ::rustls::SupportedCipherSuite;
 
 use crate::crypto;
 use crate::packet;
@@ -233,7 +235,16 @@ impl Handshake {
     }
 
     pub fn cipher(&self) -> Option<crypto::Algorithm> {
-        None
+        let cipher = self.conn.as_ref()?.negotiated_cipher_suite()?;
+
+        match cipher {
+            SupportedCipherSuite::Tls13(suite) =>
+                rustls_cipher_to_algorithm(suite.common.suite),
+
+            SupportedCipherSuite::Tls12(_) => None,
+
+            _ => None,
+        }
     }
 
     #[cfg(test)]
@@ -444,6 +455,21 @@ impl Handshake {
         }
 
         Ok(())
+    }
+}
+
+fn rustls_cipher_to_algorithm(cipher: CipherSuite) -> Option<crypto::Algorithm> {
+    match cipher {
+        CipherSuite::TLS13_AES_128_GCM_SHA256 =>
+            Some(crypto::Algorithm::AES128_GCM),
+
+        CipherSuite::TLS13_AES_256_GCM_SHA384 =>
+            Some(crypto::Algorithm::AES256_GCM),
+
+        CipherSuite::TLS13_CHACHA20_POLY1305_SHA256 =>
+            Some(crypto::Algorithm::ChaCha20_Poly1305),
+
+        _ => None,
     }
 }
 
@@ -719,6 +745,8 @@ mod tests {
         }
 
         assert!(server_crypto_ctx[packet::Epoch::Handshake].has_keys());
+        assert_eq!(server.cipher(), Some(crypto::Algorithm::AES128_GCM));
+
         let server_initial =
             drain_crypto(&mut server_crypto_ctx, packet::Epoch::Initial);
         let server_handshake =
@@ -751,6 +779,7 @@ mod tests {
 
         assert!(client_crypto_ctx[packet::Epoch::Handshake].has_keys());
         assert!(client_crypto_ctx[packet::Epoch::Application].has_keys());
+        assert_eq!(client.cipher(), Some(crypto::Algorithm::AES128_GCM));
     }
 
     #[test]
