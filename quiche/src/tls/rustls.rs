@@ -67,7 +67,7 @@ impl Context {
             certificate_identity: None,
             private_key: None,
             root_store: RootCertStore::empty(),
-            verify: true,
+            verify: false,
             keylog_enabled: false,
             early_data_enabled: false,
             alpn_protocols: Vec::new(),
@@ -369,7 +369,7 @@ impl Handshake {
             .map_err(|_| Error::TlsFail)?
             .to_owned();
 
-        let mut config = match self.verify {
+        let config_builder = match self.verify {
             true => {
                 if self.root_store.is_empty() {
                     return Err(Error::TlsFail);
@@ -377,18 +377,15 @@ impl Handshake {
 
                 ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
                     .with_root_certificates(Arc::new(self.root_store.clone()))
-                    .with_no_client_auth()
-                    .map_err(|_| Error::TlsFail)?
             },
 
             false => ::rustls::ClientConfig::builder(Arc::clone(&self.provider))
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(
                     NoCertificateVerification::new(&self.provider),
-                ))
-                .with_no_client_auth()
-                .map_err(|_| Error::TlsFail)?,
+                )),
         };
+        let mut config = self.finish_client_config(config_builder)?;
 
         config.alpn_protocols = self
             .alpn_protocols
@@ -426,13 +423,32 @@ impl Handshake {
             .map_err(|_| Error::TlsFail)?;
         let credentials =
             Credentials::new_unchecked(certificate_identity, signing_key);
-        let mut config =
-            ::rustls::ServerConfig::builder(Arc::clone(&self.provider))
-                .with_no_client_auth()
-                .with_server_credential_resolver(Arc::new(
-                    SingleCredential::from(credentials),
-                ))
+        let config_builder =
+            ::rustls::ServerConfig::builder(Arc::clone(&self.provider));
+        let config_builder = match self.verify {
+            true => {
+                if self.root_store.is_empty() {
+                    return Err(Error::TlsFail);
+                }
+
+                let verifier = ::rustls::server::WebPkiClientVerifier::builder(
+                    Arc::new(self.root_store.clone()),
+                    &self.provider,
+                )
+                .allow_unauthenticated()
+                .build()
                 .map_err(|_| Error::TlsFail)?;
+
+                config_builder.with_client_cert_verifier(Arc::new(verifier))
+            },
+
+            false => config_builder.with_no_client_auth(),
+        };
+        let mut config = config_builder
+            .with_server_credential_resolver(Arc::new(SingleCredential::from(
+                credentials,
+            )))
+            .map_err(|_| Error::TlsFail)?;
 
         config.alpn_protocols = self
             .alpn_protocols
@@ -459,6 +475,37 @@ impl Handshake {
     fn set_keylog(&self, key_log: &mut Arc<dyn ::rustls::KeyLog>) {
         if let Some(log) = &self.key_log {
             *key_log = log.clone();
+        }
+    }
+
+    fn finish_client_config(
+        &self,
+        builder: ::rustls::ConfigBuilder<
+            ::rustls::ClientConfig,
+            ::rustls::client::WantsClientCert,
+        >,
+    ) -> Result<::rustls::ClientConfig> {
+        match (&self.certificate_identity, &self.private_key) {
+            (Some(identity), Some(private_key)) => {
+                let signing_key = self
+                    .provider
+                    .key_provider
+                    .load_private_key(private_key.clone_key())
+                    .map_err(|_| Error::TlsFail)?;
+                let credentials =
+                    Credentials::new_unchecked(identity.clone(), signing_key);
+
+                builder
+                    .with_client_credential_resolver(Arc::new(
+                        SingleCredential::from(credentials),
+                    ))
+                    .map_err(|_| Error::TlsFail)
+            },
+
+            (None, None) =>
+                builder.with_no_client_auth().map_err(|_| Error::TlsFail),
+
+            _ => Err(Error::TlsFail),
         }
     }
 
@@ -748,6 +795,13 @@ fn observe_ex_data(ex_data: &mut ExData) {
 mod tests {
     use super::*;
 
+    const EXAMPLE_CERT: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/cert.crt");
+    const EXAMPLE_KEY: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/cert.key");
+    const EXAMPLE_ROOT: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rootca.crt");
+
     fn handshake(is_server: bool) -> (Handshake, [packet::CryptoContext; 3]) {
         handshake_with_keylog(is_server, false)
     }
@@ -764,18 +818,16 @@ mod tests {
         }
 
         if is_server {
-            ctx.use_certificate_chain_file(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/examples/cert.crt"
-            ))
-            .unwrap();
-            ctx.use_privkey_file(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/examples/cert.key"
-            ))
-            .unwrap();
+            ctx.use_certificate_chain_file(EXAMPLE_CERT).unwrap();
+            ctx.use_privkey_file(EXAMPLE_KEY).unwrap();
         }
 
+        handshake_from_context(ctx, is_server)
+    }
+
+    fn handshake_from_context(
+        mut ctx: Context, is_server: bool,
+    ) -> (Handshake, [packet::CryptoContext; 3]) {
         let mut handshake = ctx.new_handshake().unwrap();
         handshake.init(is_server).unwrap();
 
@@ -1077,6 +1129,54 @@ mod tests {
     }
 
     #[test]
+    fn server_context_builds_with_optional_client_auth() {
+        let mut server_ctx = Context::new().unwrap();
+        server_ctx.set_verify(true);
+        server_ctx.set_alpn(&[b"h3"]).unwrap();
+        server_ctx
+            .load_verify_locations_from_file(EXAMPLE_ROOT)
+            .unwrap();
+        server_ctx.use_certificate_chain_file(EXAMPLE_CERT).unwrap();
+        server_ctx.use_privkey_file(EXAMPLE_KEY).unwrap();
+
+        let (server, _server_crypto_ctx) =
+            handshake_from_context(server_ctx, true);
+
+        assert!(server.build_server_connection().is_ok());
+    }
+
+    #[test]
+    fn client_context_loads_certificate_and_private_key() {
+        let mut client_ctx = Context::new().unwrap();
+        client_ctx.set_verify(false);
+        client_ctx.set_alpn(&[b"h3"]).unwrap();
+        client_ctx.use_certificate_chain_file(EXAMPLE_CERT).unwrap();
+        client_ctx.use_privkey_file(EXAMPLE_KEY).unwrap();
+
+        let (mut client, mut client_crypto_ctx) =
+            handshake_from_context(client_ctx, false);
+        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config =
+            crate::recovery::RecoveryConfig::from_config(&config);
+        let application_protos = vec![b"h3".to_vec()];
+        let mut session = None;
+        let mut local_error = None;
+
+        let mut ex_data = ex_data(
+            &mut client_crypto_ctx,
+            false,
+            &application_protos,
+            &mut session,
+            &mut local_error,
+            recovery_config,
+            config.tx_cap_factor,
+        );
+
+        assert_eq!(client.do_handshake(&mut ex_data), Err(Error::Done));
+        assert!(ex_data.crypto_ctx[packet::Epoch::Initial].data_available());
+    }
+
+    #[test]
     fn handshake_writes_keylog() {
         let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
         let recovery_config =
@@ -1179,6 +1279,7 @@ mod tests {
     #[test]
     fn client_verification_requires_loaded_roots() {
         let mut ctx = Context::new().unwrap();
+        ctx.set_verify(true);
 
         let mut handshake = ctx.new_handshake().unwrap();
         handshake.init(false).unwrap();
@@ -1196,6 +1297,7 @@ mod tests {
     #[test]
     fn client_context_loads_verify_roots() {
         let mut ctx = Context::new().unwrap();
+        ctx.set_verify(true);
         ctx.load_verify_locations_from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/examples/rootca.crt"
@@ -1231,6 +1333,7 @@ mod tests {
         .unwrap();
 
         let mut ctx = Context::new().unwrap();
+        ctx.set_verify(true);
         let result =
             ctx.load_verify_locations_from_directory(dir.to_str().unwrap());
 
