@@ -277,11 +277,11 @@ impl Handshake {
     }
 
     pub fn peer_cert_chain(&self) -> Option<Vec<&[u8]>> {
-        None
+        peer_cert_chain(self.conn.as_ref()?.peer_identity()?)
     }
 
     pub fn peer_cert(&self) -> Option<&[u8]> {
-        None
+        peer_cert(self.conn.as_ref()?.peer_identity()?)
     }
 
     #[cfg(test)]
@@ -473,6 +473,53 @@ fn rustls_cipher_to_algorithm(cipher: CipherSuite) -> Option<crypto::Algorithm> 
     }
 }
 
+fn peer_cert_chain<'a>(identity: &'a Identity<'static>) -> Option<Vec<&'a [u8]>> {
+    match identity {
+        Identity::X509(certificates) => {
+            let leaf = certificates.end_entity.as_ref();
+            if leaf.is_empty() {
+                return None;
+            }
+
+            let mut chain = vec![leaf];
+
+            for cert in &certificates.intermediates {
+                let cert = cert.as_ref();
+                if cert.is_empty() {
+                    return None;
+                }
+
+                chain.push(cert);
+            }
+
+            Some(chain)
+        },
+
+        Identity::RawPublicKey(spki) => {
+            let spki = spki.as_ref();
+            (!spki.is_empty()).then_some(vec![spki])
+        },
+
+        _ => None,
+    }
+}
+
+fn peer_cert<'a>(identity: &'a Identity<'static>) -> Option<&'a [u8]> {
+    match identity {
+        Identity::X509(certificates) => {
+            let cert = certificates.end_entity.as_ref();
+            (!cert.is_empty()).then_some(cert)
+        },
+
+        Identity::RawPublicKey(spki) => {
+            let spki = spki.as_ref();
+            (!spki.is_empty()).then_some(spki)
+        },
+
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 struct NoCertificateVerification {
     supported_schemes: Vec<::rustls::crypto::SignatureScheme>,
@@ -648,6 +695,16 @@ mod tests {
         data
     }
 
+    fn example_cert_chain() -> Vec<Vec<u8>> {
+        CertificateDer::pem_file_iter(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/cert.crt"
+        ))
+        .unwrap()
+        .map(|cert| cert.unwrap().as_ref().to_vec())
+        .collect()
+    }
+
     #[test]
     fn client_handshake_emits_initial_crypto() {
         let mut ctx = Context::new().unwrap();
@@ -780,6 +837,15 @@ mod tests {
         assert!(client_crypto_ctx[packet::Epoch::Handshake].has_keys());
         assert!(client_crypto_ctx[packet::Epoch::Application].has_keys());
         assert_eq!(client.cipher(), Some(crypto::Algorithm::AES128_GCM));
+
+        let expected_chain = example_cert_chain();
+        assert_eq!(client.peer_cert(), Some(expected_chain[0].as_slice()));
+        assert_eq!(
+            client.peer_cert_chain(),
+            Some(expected_chain.iter().map(Vec::as_slice).collect::<Vec<_>>())
+        );
+        assert!(server.peer_cert().is_none());
+        assert!(server.peer_cert_chain().is_none());
     }
 
     #[test]
