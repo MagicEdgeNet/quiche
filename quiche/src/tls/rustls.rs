@@ -25,7 +25,9 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::fmt;
+use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -90,22 +92,31 @@ impl Context {
     }
 
     pub fn load_verify_locations_from_file(&mut self, file: &str) -> Result<()> {
-        let certs = CertificateDer::pem_file_iter(file)
-            .map_err(|_| Error::TlsFail)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|_| Error::TlsFail)?;
-        let (valid, _invalid) = self.root_store.add_parsable_certificates(certs);
+        self.load_root_certs_from_file(file)
+    }
+
+    pub fn load_verify_locations_from_directory(
+        &mut self, path: &str,
+    ) -> Result<()> {
+        let mut valid = 0;
+
+        for entry in fs::read_dir(path).map_err(|_| Error::TlsFail)? {
+            let entry = entry.map_err(|_| Error::TlsFail)?;
+            let path = entry.path();
+
+            if !path.is_file() {
+                continue;
+            }
+
+            if self.load_root_certs_from_file(&path).is_ok() {
+                valid += 1;
+            }
+        }
 
         match valid {
             0 => Err(Error::TlsFail),
             _ => Ok(()),
         }
-    }
-
-    pub fn load_verify_locations_from_directory(
-        &mut self, _path: &str,
-    ) -> Result<()> {
-        Err(Error::TlsFail)
     }
 
     pub fn use_certificate_chain_file(&mut self, file: &str) -> Result<()> {
@@ -147,6 +158,21 @@ impl Context {
     }
 
     pub fn set_early_data_enabled(&mut self, _enabled: bool) {}
+
+    fn load_root_certs_from_file(
+        &mut self, file: impl AsRef<Path>,
+    ) -> Result<()> {
+        let certs = CertificateDer::pem_file_iter(file)
+            .map_err(|_| Error::TlsFail)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| Error::TlsFail)?;
+        let (valid, _invalid) = self.root_store.add_parsable_certificates(certs);
+
+        match valid {
+            0 => Err(Error::TlsFail),
+            _ => Ok(()),
+        }
+    }
 }
 
 pub struct Handshake {
@@ -1107,6 +1133,42 @@ mod tests {
             "/examples/rootca.crt"
         ))
         .unwrap();
+
+        let mut handshake = ctx.new_handshake().unwrap();
+        handshake.init(false).unwrap();
+        handshake.set_host_name("example.com").unwrap();
+        handshake
+            .set_quic_transport_params(&crate::TransportParams::default(), false)
+            .unwrap();
+
+        assert!(handshake.build_client_connection().is_ok());
+    }
+
+    #[test]
+    fn client_context_loads_verify_roots_from_directory() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid = std::process::id();
+        let dir =
+            std::env::temp_dir().join(format!("quiche-rustls-roots-{pid}-{now}"));
+        let root_path = dir.join("rootca.crt");
+
+        fs::create_dir(&dir).unwrap();
+        fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rootca.crt"),
+            &root_path,
+        )
+        .unwrap();
+
+        let mut ctx = Context::new().unwrap();
+        let result =
+            ctx.load_verify_locations_from_directory(dir.to_str().unwrap());
+
+        fs::remove_dir_all(&dir).unwrap();
+
+        result.unwrap();
 
         let mut handshake = ctx.new_handshake().unwrap();
         handshake.init(false).unwrap();
