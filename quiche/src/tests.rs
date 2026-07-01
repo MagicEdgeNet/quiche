@@ -382,7 +382,7 @@ fn missing_initial_source_connection_id(
 
     // Server rejects transport parameters.
     assert_eq!(
-        pipe.server_recv(&mut buf[..len]),
+        pipe.server_recv_client_initial_flight(&mut buf, len),
         Err(Error::InvalidTransportParam)
     );
 }
@@ -406,7 +406,7 @@ fn invalid_initial_source_connection_id(
 
     // Server rejects transport parameters.
     assert_eq!(
-        pipe.server_recv(&mut buf[..len]),
+        pipe.server_recv_client_initial_flight(&mut buf, len),
         Err(Error::InvalidTransportParam)
     );
 }
@@ -5754,6 +5754,7 @@ fn retry_missing_original_destination_connection_id(
     )
     .unwrap();
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
@@ -5817,6 +5818,7 @@ fn retry_invalid_original_destination_connection_id(
     )
     .unwrap();
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
@@ -5953,6 +5955,7 @@ fn retry_invalid_source_connection_id(
     )
     .unwrap();
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    assert_eq!(pipe.client_send_remaining_initial(&mut buf), Ok(()));
 
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 

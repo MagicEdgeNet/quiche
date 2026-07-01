@@ -367,6 +367,13 @@ impl<F: BufFactory> Pipe<F> {
         Ok(())
     }
 
+    pub fn server_recv_client_initial_flight(
+        &mut self, buf: &mut [u8], len: usize,
+    ) -> Result<()> {
+        self.server_recv(&mut buf[..len])?;
+        self.client_send_remaining_initial(buf)
+    }
+
     pub fn send_pkt_to_server(
         &mut self, pkt_type: Type, frames: &[frame::Frame], buf: &mut [u8],
     ) -> Result<usize> {
