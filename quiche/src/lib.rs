@@ -362,6 +362,8 @@
 //! * `boringssl-boring-crate` (default): Use the BoringSSL library provided by
 //!   the [boring] crate.
 //!
+//! * `rustls-aws-lc-rs`: Use rustls with the aws-lc-rs crypto provider.
+//!
 //! * `pkg-config-meta`: Generate pkg-config metadata file for libquiche.
 //!
 //! * `ffi`: Build and expose the FFI API.
