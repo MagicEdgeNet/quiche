@@ -11,7 +11,7 @@ Cloudflare's QUIC and HTTP/3 implementation in Rust. Workspace of 11 crates: cor
 ## STRUCTURE
 
 ```
-quiche/                     # Core QUIC+H3 library (C FFI, BoringSSL via boring-sys)
+quiche/                     # Core QUIC+H3 library (rustls default; BoringSSL opt-in)
 tokio-quiche/               # Async tokio wrapper (server/client drivers)
 apps/                       # CLI binaries: quiche-client, quiche-server
 h3i/                        # HTTP/3 interactive testing/debugging tool
@@ -48,7 +48,7 @@ quiche  datagram-socket  qlog-dancer        (Layer 1)
 | QUIC connection logic | `quiche/src/lib.rs` | 9k lines, core `Connection` struct |
 | HTTP/3 protocol | `quiche/src/h3/mod.rs` | Own `Error`/`Result` types |
 | Congestion control | `quiche/src/recovery/` | Two impls: `congestion/` (legacy) + `gcongestion/` (BBR2) |
-| TLS/crypto backends | `quiche/src/tls/`, `quiche/src/crypto/` | BoringSSL only |
+| TLS/crypto backends | `quiche/src/tls/`, `quiche/src/crypto/` | rustls default; BoringSSL opt-in |
 | C FFI | `quiche/src/ffi.rs` + `quiche/include/quiche.h` | Behind `ffi` feature |
 | Async server/client | `tokio-quiche/src/` | `ApplicationOverQuic` trait is the extension point |
 | H3 async driver | `tokio-quiche/src/http3/driver/` | `DriverHooks` sealed trait, channels |
@@ -98,19 +98,25 @@ quiche  datagram-socket  qlog-dancer        (Layer 1)
 ## FEATURE FLAGS
 
 ```
-quiche:        default=boringssl-boring-crate
-               qlog, gcongestion, internal, ffi, fuzzing, sfv, custom-client-dcid,
+quiche:        default=rustls-aws-lc-rs
+               boringssl-boring-crate, rustls-aws-lc-rs, qlog, gcongestion,
+               internal, ffi, fuzzing, sfv, custom-client-dcid,
                pkg-config-meta
-tokio-quiche:  fuzzing, quiche_internal, gcongestion, zero-copy, rpk
-               (hardcodes: quiche/boringssl-boring-crate + quiche/qlog)
-h3i:           async (enables tokio-quiche dependency)
+tokio-quiche:  default=rustls-aws-lc-rs,qlog-gzip,qlog-zstd
+               boringssl-boring-crate, rustls-aws-lc-rs, fuzzing,
+               quiche_internal, gcongestion, zero-copy, rpk
+h3i:           default=rustls-aws-lc-rs
+               boringssl-boring-crate, rustls-aws-lc-rs, async
+               (async enables tokio-quiche dependency)
 ```
 
 ## COMMANDS
 
 ```bash
 # Dev
-cargo build                                           # build workspace (boring-sys builds BoringSSL)
+cargo build                                           # default rustls/aws-lc-rs backend
+cargo build --workspace --no-default-features --features boringssl-boring-crate,qlog,sfv
+cargo build --workspace --no-default-features --features rustls-aws-lc-rs,qlog,sfv
 cargo test --all-targets --features=async,ffi,qlog --workspace  # full test suite
 cargo test --doc --features=async,ffi,qlog --workspace          # doc tests (separate!)
 
@@ -127,10 +133,13 @@ make docker-build                                     # quiche-base + quiche-qns
 
 ## NOTES
 
-- **No git submodules**: BoringSSL is built by `boring-sys`; `cmake` must be available.
+- **No git submodules**: BoringSSL is built by `boring-sys` only when
+  `boringssl-boring-crate` is enabled; `cmake` must be available for that
+  backend.
 - **MSRV 1.88**: `rust-version` field in Cargo.toml.
 - **Doc tests are separate**: `cargo test --all-targets` does NOT run doc tests (cargo#6669).
-- **`BORING_BSSL_PATH`**: env var to point `boring-sys` at a custom BoringSSL source tree.
+- **`BORING_BSSL_PATH`**: env var to point `boring-sys` at a custom BoringSSL
+  source tree when using the BoringSSL backend.
 - **`RUSTFLAGS="-D warnings"`**: CI enforces; all warnings are errors.
 - **Cargo.lock is gitignored** (library project).
 - **Dual CI**: GitHub Actions (real) + GitLab CI (no-op stub).
