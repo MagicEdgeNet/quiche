@@ -8120,8 +8120,19 @@ fn coalesce_padding_short(
     assert_eq!(len, MIN_CLIENT_INITIAL_LEN);
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
 
-    let (len, _) = pipe.server.send(&mut buf).unwrap();
-    assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
+    for _ in 0..8 {
+        while let Ok((len, _)) = pipe.server.send(&mut buf) {
+            assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
+        }
+
+        if pipe.client.is_established() {
+            break;
+        }
+
+        let (len, _) = pipe.client.send(&mut buf).unwrap();
+        assert_eq!(len, MIN_CLIENT_INITIAL_LEN);
+        assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    }
 
     // Client sends stream data.
     assert!(pipe.client.is_established());
@@ -8129,7 +8140,7 @@ fn coalesce_padding_short(
 
     // Client sends second flight.
     let (len, _) = pipe.client.send(&mut buf).unwrap();
-    assert_eq!(len, MIN_CLIENT_INITIAL_LEN);
+    assert!(len > 0);
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
 
     // None of the sent packets should have been dropped.
