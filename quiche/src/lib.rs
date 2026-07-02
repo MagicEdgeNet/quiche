@@ -3213,6 +3213,13 @@ impl<F: BufFactory> Connection<F> {
         // Select packet number space epoch based on the received packet's type.
         let epoch = hdr.ty.to_epoch()?;
 
+        // Endpoints must not process incoming 1-RTT packets before the TLS
+        // handshake is complete. This can happen when the TLS backend exposes
+        // 1-RTT read keys before it reports handshake completion.
+        if hdr.ty == Type::Short && !self.is_established() {
+            return Err(Error::Done);
+        }
+
         // Select AEAD context used to open incoming packet.
         let aead = if hdr.ty == Type::ZeroRTT {
             // Only use 0-RTT key if incoming packet is 0-RTT.
