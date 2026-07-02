@@ -17,6 +17,14 @@ readme = "README.md"
 workspace = true
 
 [features]
+default = ["boringssl-boring-crate"]
+
+# Use the BoringSSL library provided by the boring crate.
+boringssl-boring-crate = ["quiche/boringssl-boring-crate"]
+
+# Use rustls with the aws-lc-rs crypto provider.
+rustls-aws-lc-rs = ["quiche/rustls-aws-lc-rs"]
+
 async = ["dep:tokio", "dep:tokio-quiche"]
 
 [dependencies]

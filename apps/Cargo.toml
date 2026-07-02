@@ -13,6 +13,12 @@ publish = false
 workspace = true
 
 [features]
+# Use the BoringSSL library provided by the boring crate.
+boringssl-boring-crate = ["quiche/boringssl-boring-crate"]
+
+# Use rustls with the aws-lc-rs crypto provider.
+rustls-aws-lc-rs = ["quiche/rustls-aws-lc-rs"]
+
 # Enable quiche's fuzzing mode.
 fuzzing = ["quiche/fuzzing"]
 
@@ -22,7 +28,7 @@ qlog = ["quiche/qlog"]
 # Enable sfv support.
 sfv = ["quiche/sfv"]
 
-default = ["qlog", "sfv"]
+default = ["boringssl-boring-crate", "qlog", "sfv"]
 
 [dependencies]
 docopt = "1"
@@ -32,7 +38,7 @@ log = { workspace = true }
 mio = { workspace = true, features = ["net", "os-poll"] }
 nix = { workspace = true, features = ["net", "socket", "uio"] }
 octets = { workspace = true }
-quiche = { workspace = true }
+quiche = { workspace = true, default-features = false }
 ring = { workspace = true }
 url = { workspace = true }
 
