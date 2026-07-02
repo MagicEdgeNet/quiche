@@ -53,7 +53,6 @@ use ::rustls::error::CertificateError;
 use ::rustls::pki_types::pem::PemObject;
 use ::rustls::pki_types::CertificateDer;
 use ::rustls::pki_types::PrivateKeyDer;
-#[cfg(test)]
 use ::rustls::pki_types::SubjectPublicKeyInfoDer;
 use ::rustls::server::StoresServerSessions;
 use ::rustls::DistinguishedName;
@@ -173,6 +172,16 @@ impl Context {
             Identity::from_cert_chain(certs).map_err(|_| Error::TlsFail)?;
 
         self.certificate_identity = Some(Arc::new(identity));
+
+        Ok(())
+    }
+
+    pub fn use_raw_public_key_file(&mut self, file: &str) -> Result<()> {
+        let public_key = fs::read(file).map_err(|_| Error::TlsFail)?;
+
+        self.certificate_identity = Some(Arc::new(Identity::RawPublicKey(
+            SubjectPublicKeyInfoDer::from(public_key),
+        )));
 
         Ok(())
     }
@@ -2385,6 +2394,32 @@ mod tests {
         .unwrap()
         .map(|cert| cert.unwrap().as_ref().to_vec())
         .collect()
+    }
+
+    #[test]
+    fn raw_public_key_file_configures_identity() {
+        let mut ctx = Context::new().unwrap();
+        let private_key = PrivateKeyDer::from_pem_file(EXAMPLE_KEY).unwrap();
+        let signing_key = ctx
+            .provider
+            .key_provider
+            .load_private_key(private_key)
+            .unwrap();
+        let public_key = signing_key.public_key().unwrap().into_owned();
+        let public_key_path = std::env::temp_dir()
+            .join(format!("quiche-rustls-rpk-{}.der", std::process::id()));
+
+        fs::write(&public_key_path, public_key.as_ref()).unwrap();
+        ctx.use_raw_public_key_file(public_key_path.to_str().unwrap())
+            .unwrap();
+        fs::remove_file(public_key_path).unwrap();
+
+        let identity = ctx.certificate_identity.as_ref().unwrap();
+
+        assert!(matches!(
+            identity.as_ref(),
+            Identity::RawPublicKey(spki) if spki.as_ref() == public_key.as_ref()
+        ));
     }
 
     #[test]

@@ -705,6 +705,26 @@ impl Config {
         self.tls_ctx.use_certificate_chain_file(file)
     }
 
+    /// Configures the given raw public key.
+    ///
+    /// The content of `file` is parsed as a DER-encoded
+    /// SubjectPublicKeyInfo value.
+    ///
+    /// ## Examples:
+    ///
+    /// ```no_run
+    /// # let mut config = quiche::Config::new(0xbabababa)?;
+    /// config.load_raw_public_key_from_der_file("/path/to/public_key.der")?;
+    /// # Ok::<(), quiche::Error>(())
+    /// ```
+    #[cfg(feature = "rustls-aws-lc-rs")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-aws-lc-rs")))]
+    pub fn load_raw_public_key_from_der_file(
+        &mut self, file: &str,
+    ) -> Result<()> {
+        self.tls_ctx.use_raw_public_key_file(file)
+    }
+
     /// Configures the given private key.
     ///
     /// The content of `file` is parsed as a PEM-encoded private key.

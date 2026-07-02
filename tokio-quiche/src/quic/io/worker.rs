@@ -694,9 +694,8 @@ where
         Ok(())
     }
 
-    // When a connection is established, process application data, if not the task
-    // is probably polled following a wakeup from boring, so we check if quiche
-    // has any handshake packets to send.
+    // When a connection is established, process application data. Otherwise,
+    // check whether quiche has any handshake packets to send.
     //
     // TODO(erittenhouse): would be nice to decouple wait_for_data from the
     // application, but wait_for_quiche relies on IOW methods, so we can't write a

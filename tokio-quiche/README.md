@@ -134,10 +134,10 @@ multiplexed requests within the same connection.
 # Feature Flags
 
 tokio-quiche supports a number of feature flags to enable experimental features,
-performance enhancements, and additional telemetry. By default, no feature flags are
-enabled.
+performance enhancements, and additional telemetry. By default, rustls/aws-lc-rs
+and QLOG compression support are enabled.
 
-- `rpk`: Support for raw public keys (RPK) in QUIC handshakes (via [boring]).
+- `rpk`: Support for raw public keys (RPK) in QUIC handshakes via rustls.
 - `gcongestion`: Replace quiche's original congestion control implementation with one
    adapted from google/quiche.
 - `zero-copy`: Use zero-copy sends with quiche (implies `gcongestion`).
@@ -166,4 +166,3 @@ controlled by the final binary:
 [connect]: https://docs.rs/tokio-quiche/latest/tokio_quiche/quic/fn.connect.html
 [ApplicationOverQuic]: https://docs.rs/tokio-quiche/latest/tokio_quiche/trait.ApplicationOverQuic.html
 [H3Driver]: https://docs.rs/tokio-quiche/latest/tokio-quiche/http3/driver/struct.H3Driver.html
-[boring]: https://docs.rs/boring/latest/boring/

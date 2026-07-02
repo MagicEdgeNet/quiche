@@ -9,7 +9,7 @@ Async QUIC connection management. Splits socket into recv-half (one `InboundPack
 ```
 mod.rs                        # Entrypoints: connect, connect_with_config, start_listener
 raw.rs                        # wrap_quiche_conn(): bypass router, manual packet feed
-hooks.rs                      # ConnectionHook trait (custom SslContextBuilder)
+hooks.rs                      # ConnectionHook marker trait
 addr_validation_token.rs      # RETRY token generation/validation for server
 
 connection/
