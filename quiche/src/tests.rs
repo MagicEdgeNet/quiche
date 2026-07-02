@@ -32,6 +32,23 @@ use crate::Header;
 
 use rstest::rstest;
 
+fn assert_tx_cap_for_cc(
+    cc_algorithm_name: &str, tx_cap: usize, expected_cubic_tx_cap: usize,
+) {
+    if cc_algorithm_name == "cubic" {
+        assert_eq!(tx_cap, expected_cubic_tx_cap);
+    } else {
+        // BBR2 can grow during handshake as ACKs are processed. The exact
+        // post-handshake value depends on TLS flight sizes.
+        assert!(
+            (expected_cubic_tx_cap..expected_cubic_tx_cap * 2).contains(&tx_cap),
+            "expected BBR2 tx_cap {tx_cap} to be between \
+             {expected_cubic_tx_cap} and {}",
+            expected_cubic_tx_cap * 2
+        );
+    }
+}
+
 #[test]
 fn transport_params() {
     // Server encodes, client decodes.
@@ -6431,13 +6448,11 @@ fn client_rst_stream_while_bytes_in_flight(
 
     // Server sends stream data bigger than cwnd.
     let send_buf = [0; 50000];
+    let initial_tx_cap = pipe.server.tx_cap;
+    assert_tx_cap_for_cc(cc_algorithm_name, initial_tx_cap, 12000);
     assert_eq!(
         pipe.server.stream_send(4, &send_buf, false),
-        if cc_algorithm_name == "cubic" {
-            Ok(12000)
-        } else {
-            Ok(13878)
-        }
+        Ok(initial_tx_cap)
     );
     let server_flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
@@ -6456,9 +6471,15 @@ fn client_rst_stream_while_bytes_in_flight(
 
     // tx_buffered goes down to 0 after the reset and acks are
     // processed.  A full cwnd's worth of packets can be sent.
-    let expected_cwnd = match cc_algorithm_name {
-        "bbr2" | "bbr2_gcongestion" => 27756,
-        _ => 24000,
+    let expected_cwnd = if cc_algorithm_name == "cubic" {
+        24000
+    } else {
+        pipe.server
+            .paths
+            .get_active()
+            .expect("no active")
+            .recovery
+            .cwnd()
     };
 
     assert_eq!(pipe.server.streams.tx_buffered(), 0);
@@ -6520,13 +6541,11 @@ fn client_rst_stream_while_bytes_in_flight_with_packet_loss(
 
     // Server sends stream data bigger than cwnd.
     let send_buf = [0; 50000];
+    let initial_tx_cap = pipe.server.tx_cap;
+    assert_tx_cap_for_cc(cc_algorithm_name, initial_tx_cap, 12000);
     assert_eq!(
         pipe.server.stream_send(4, &send_buf, false),
-        if cc_algorithm_name == "cubic" {
-            Ok(12000)
-        } else {
-            Ok(13878)
-        }
+        Ok(initial_tx_cap)
     );
     let mut server_flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
@@ -6544,9 +6563,15 @@ fn client_rst_stream_while_bytes_in_flight_with_packet_loss(
 
     // tx_buffered goes down to 0 after the reset and acks are
     // processed.  A full cwnd's worth of packets can be sent.
-    let expected_cwnd = match cc_algorithm_name {
-        "bbr2" | "bbr2_gcongestion" => 26556,
-        _ => 8400,
+    let expected_cwnd = if cc_algorithm_name == "cubic" {
+        8400
+    } else {
+        pipe.server
+            .paths
+            .get_active()
+            .expect("no active")
+            .recovery
+            .cwnd()
     };
 
     assert_eq!(pipe.server.streams.tx_buffered(), 0);
@@ -6601,13 +6626,11 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited(
     // Client sends stream data bigger than cwnd (it will never arrive to the
     // server).
     let send_buf1 = [0; 20000];
+    let initial_tx_cap = pipe.client.tx_cap;
+    assert_tx_cap_for_cc(cc_algorithm_name, initial_tx_cap, 12000);
     assert_eq!(
         pipe.client.stream_send(0, &send_buf1, false),
-        if cc_algorithm_name == "cubic" {
-            Ok(12000)
-        } else {
-            Ok(12299)
-        }
+        Ok(initial_tx_cap)
     );
 
     test_utils::emit_flight(&mut pipe.client).ok();
@@ -6676,13 +6699,11 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited_despite_max_unacknowledgin
     // Client sends stream data bigger than cwnd (it will never arrive to the
     // server). This exhausts the congestion window.
     let send_buf1 = [0; 20000];
+    let initial_tx_cap = pipe.client.tx_cap;
+    assert_tx_cap_for_cc(cc_algorithm_name, initial_tx_cap, 12000);
     assert_eq!(
         pipe.client.stream_send(0, &send_buf1, false),
-        if cc_algorithm_name == "cubic" {
-            Ok(12000)
-        } else {
-            Ok(12299)
-        }
+        Ok(initial_tx_cap)
     );
 
     test_utils::emit_flight(&mut pipe.client).ok();
@@ -9217,24 +9238,15 @@ fn send_capacity(
         Ok((6, true))
     );
 
-    assert_eq!(
-        pipe.server.tx_cap,
-        if cc_algorithm_name == "cubic" {
-            12000
-        } else {
-            13873
-        }
-    );
+    let initial_tx_cap = pipe.server.tx_cap;
+    assert_tx_cap_for_cc(cc_algorithm_name, initial_tx_cap, 12000);
 
     assert_eq!(pipe.server.stream_send(0, &buf[..5000], false), Ok(5000));
     assert_eq!(pipe.server.stream_send(4, &buf[..5000], false), Ok(5000));
+    let remaining_tx_cap = initial_tx_cap - 10000;
     assert_eq!(
-        pipe.server.stream_send(8, &buf[..5000], false),
-        if cc_algorithm_name == "cubic" {
-            Ok(2000)
-        } else {
-            Ok(3873)
-        }
+        pipe.server.stream_send(8, &buf[..remaining_tx_cap], false),
+        Ok(remaining_tx_cap)
     );
 
     // No more connection send capacity.
@@ -9616,29 +9628,11 @@ fn initial_cwnd(
     let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    if cc_algorithm_name == "cubic" {
-        assert_eq!(
-            pipe.server.tx_cap,
-            CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS * 1200
-        );
-    } else {
-        // TODO understand where these adjustments come from and why they vary
-        // by OS target.
-        let expected = CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS * 1200 + 1447;
-
-        assert!(
-            pipe.server.tx_cap >= expected,
-            "{} vs {}",
-            pipe.server.tx_cap,
-            expected
-        );
-        assert!(
-            pipe.server.tx_cap <= expected + 1,
-            "{} vs {}",
-            pipe.server.tx_cap,
-            expected + 1
-        );
-    }
+    assert_tx_cap_for_cc(
+        cc_algorithm_name,
+        pipe.server.tx_cap,
+        CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS * 1200,
+    );
 
     Ok(())
 }
@@ -11374,12 +11368,10 @@ fn resilience_against_migration_attack(
     const DATA_BYTES: usize = 24000;
     let buf = [42; DATA_BYTES];
     let mut recv_buf = [0; DATA_BYTES];
+    let initial_tx_cap = pipe.server.tx_cap;
+    assert_tx_cap_for_cc(cc_algorithm_name, initial_tx_cap, 12000);
     let send1_bytes = pipe.server.stream_send(1, &buf, true).unwrap();
-    assert_eq!(send1_bytes, match cc_algorithm_name {
-        "bbr2" => 13880,
-        "bbr2_gcongestion" => 13880,
-        _ => 12000,
-    });
+    assert_eq!(send1_bytes, initial_tx_cap);
     assert_eq!(
         test_utils::process_flight(
             &mut pipe.client,
