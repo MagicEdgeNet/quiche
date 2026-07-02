@@ -5,6 +5,9 @@
 [![license](https://img.shields.io/github/license/cloudflare/quiche.svg)](https://opensource.org/licenses/BSD-2-Clause)
 ![build](https://img.shields.io/github/actions/workflow/status/cloudflare/quiche/stable.yml?branch=master)
 
+> **Warning**: This fork is used internally at MagicEdge and may not be suitable for production use. **Use at your own risk.**
+
+
 [quiche] is an implementation of the QUIC transport protocol and HTTP/3 as
 specified by the [IETF]. It provides a low level API for processing QUIC packets
 and handling connection state. The application is responsible for providing I/O
