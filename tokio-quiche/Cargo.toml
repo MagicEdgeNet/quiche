@@ -11,7 +11,7 @@ readme = "README.md"
 rust-version = "1.88"
 
 [features]
-default = ["boringssl-boring-crate", "qlog-gzip", "qlog-zstd"]
+default = ["rustls-aws-lc-rs", "qlog-gzip", "qlog-zstd"]
 
 # Use the BoringSSL library provided by the boring crate.
 boringssl-boring-crate = [

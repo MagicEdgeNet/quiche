@@ -28,7 +28,7 @@ qlog = ["quiche/qlog"]
 # Enable sfv support.
 sfv = ["quiche/sfv"]
 
-default = ["boringssl-boring-crate", "qlog", "sfv"]
+default = ["rustls-aws-lc-rs", "qlog", "sfv"]
 
 [dependencies]
 docopt = "1"

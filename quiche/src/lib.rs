@@ -359,10 +359,11 @@
 //! quiche defines a number of [feature flags] to reduce the amount of compiled
 //! code and dependencies:
 //!
-//! * `boringssl-boring-crate` (default): Use the BoringSSL library provided by
-//!   the [boring] crate.
+//! * `rustls-aws-lc-rs` (default): Use rustls with the aws-lc-rs crypto
+//!   provider.
 //!
-//! * `rustls-aws-lc-rs`: Use rustls with the aws-lc-rs crypto provider.
+//! * `boringssl-boring-crate`: Use the BoringSSL library provided by the
+//!   [boring] crate.
 //!
 //! * `pkg-config-meta`: Generate pkg-config metadata file for libquiche.
 //!

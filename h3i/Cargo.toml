@@ -17,7 +17,7 @@ readme = "README.md"
 workspace = true
 
 [features]
-default = ["boringssl-boring-crate"]
+default = ["rustls-aws-lc-rs"]
 
 # Use the BoringSSL library provided by the boring crate.
 boringssl-boring-crate = [

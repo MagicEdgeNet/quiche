@@ -25,7 +25,7 @@ rust-version = "1.88"
 workspace = true
 
 [features]
-default = ["boringssl-boring-crate"]
+default = ["rustls-aws-lc-rs"]
 
 # Use the BoringSSL library provided by the boring crate.
 boringssl-boring-crate = ["boring", "foreign-types-shared"]
@@ -68,7 +68,7 @@ tag-prefix = ""
 
 [package.metadata.docs.rs]
 no-default-features = true
-features = ["boringssl-boring-crate", "qlog", "custom-client-dcid"]
+features = ["rustls-aws-lc-rs", "qlog", "custom-client-dcid"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [build-dependencies]
