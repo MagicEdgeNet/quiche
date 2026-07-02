@@ -345,13 +345,6 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    // Note: some vendor-specific methods are implemented in the boringssl
-    // submodule.
-    #[cfg(feature = "ffi")]
-    pub unsafe fn from_ptr(ssl: *mut c_void) -> Handshake {
-        Handshake::new(ssl as *mut SSL)
-    }
-
     fn new(ptr: *mut SSL) -> Handshake {
         Handshake {
             ptr,
