@@ -9337,13 +9337,6 @@ impl<F: BufFactory> Connection<F> {
     }
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
-impl<F: BufFactory> AsMut<boring::ssl::SslRef> for Connection<F> {
-    fn as_mut(&mut self) -> &mut boring::ssl::SslRef {
-        self.handshake.ssl_mut()
-    }
-}
-
 /// Maps an `Error` to `Error::Done`, or itself.
 ///
 /// When a received packet that hasn't yet been authenticated triggers a failure
