@@ -9081,7 +9081,8 @@ fn update_max_datagram_size(
         .set_application_protos(&[b"proto1", b"proto2"])
         .unwrap();
     // Larger than the client
-    server_config.set_max_send_udp_payload_size(1500);
+    let server_max_send_udp_payload_size = 1500;
+    server_config.set_max_send_udp_payload_size(server_max_send_udp_payload_size);
 
     let mut pipe = test_utils::Pipe {
         client: connect(
@@ -9110,7 +9111,7 @@ fn update_max_datagram_size(
             .expect("no active")
             .recovery
             .max_datagram_size(),
-        1500,
+        server_max_send_udp_payload_size,
     );
 
     assert_eq!(pipe.handshake(), Ok(()));
@@ -9126,19 +9127,29 @@ fn update_max_datagram_size(
             .max_datagram_size(),
         1200,
     );
-    assert_eq!(
-        pipe.server
-            .paths
-            .get_active()
-            .expect("no active")
-            .recovery
-            .cwnd(),
-        if cc_algorithm_name == "cubic" {
-            12000
-        } else {
-            13421
-        },
-    );
+
+    let recovery = &pipe.server.paths.get_active().expect("no active").recovery;
+    let cwnd = recovery.cwnd();
+    let new_initial_cwnd =
+        recovery.max_datagram_size() * DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS;
+
+    if cc_algorithm_name == "cubic" {
+        assert_eq!(cwnd, new_initial_cwnd);
+    } else {
+        let old_initial_cwnd = server_max_send_udp_payload_size *
+            DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS;
+
+        // BBR2 scales its current cwnd by MSS. The exact value can vary with
+        // TLS flight sizes, but it must reflect the lower peer payload size.
+        assert!(
+            cwnd >= new_initial_cwnd,
+            "expected BBR2 cwnd {cwnd} to be at least {new_initial_cwnd}"
+        );
+        assert!(
+            cwnd < old_initial_cwnd,
+            "expected BBR2 cwnd {cwnd} to be below {old_initial_cwnd}"
+        );
+    }
 }
 
 #[rstest]
