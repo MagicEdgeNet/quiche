@@ -147,18 +147,6 @@ impl Context {
         }
     }
 
-    #[cfg(feature = "boringssl-boring-crate")]
-    pub fn from_boring(
-        ssl_ctx_builder: boring::ssl::SslContextBuilder,
-    ) -> Context {
-        use foreign_types_shared::ForeignType;
-
-        let mut ctx = Context(ssl_ctx_builder.build().into_ptr() as _);
-        ctx.set_session_callback();
-
-        ctx
-    }
-
     pub fn new_handshake(&mut self) -> Result<Handshake> {
         unsafe {
             let ssl = SSL_new(self.as_mut_ptr());
@@ -359,7 +347,7 @@ pub struct Handshake {
 impl Handshake {
     // Note: some vendor-specific methods are implemented in the boringssl
     // submodule.
-    #[cfg(any(feature = "ffi", feature = "boringssl-boring-crate"))]
+    #[cfg(feature = "ffi")]
     pub unsafe fn from_ptr(ssl: *mut c_void) -> Handshake {
         Handshake::new(ssl as *mut SSL)
     }
@@ -709,18 +697,6 @@ pub struct ExData<'a> {
 impl<'a> ExData<'a> {
     fn from_ssl_ptr(ptr: *const SSL) -> Option<&'a mut Self> {
         get_ex_data_from_ptr::<ExData>(ptr, *QUICHE_EX_DATA_INDEX)
-    }
-
-    #[cfg(feature = "boringssl-boring-crate")]
-    pub fn from_ssl_ref(ssl: &mut boring::ssl::SslRef) -> Option<&mut Self> {
-        use boring::ex_data::Index;
-
-        // SAFETY: the QUICHE_EX_DATA_INDEX index is guaranteed to be created,
-        // and the associated data is always `ExData`.
-        let idx: Index<boring::ssl::Ssl, ExData> =
-            unsafe { Index::from_raw(*QUICHE_EX_DATA_INDEX) };
-
-        ssl.ex_data_mut(idx)
     }
 }
 

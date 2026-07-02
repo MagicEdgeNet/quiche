@@ -98,9 +98,8 @@ to set these to something else to satisfy their needs using the following:
 - [`set_initial_max_stream_data_bidi_remote()`]
 - [`set_initial_max_stream_data_uni()`]
 
-[`Config`] also holds TLS configuration. This can be changed by mutators on
-the an existing object, or by constructing a TLS context manually and
-creating a configuration using [`with_boring_ssl_ctx_builder()`].
+[`Config`] also holds TLS configuration, which can be changed by mutators on
+the existing object.
 
 A configuration object can be shared among multiple connections.
 
@@ -267,7 +266,6 @@ receiving HTTP requests and responses on top of the QUIC transport protocol.
 [`set_initial_max_stream_data_bidi_local()`]: https://docs.rs/quiche/latest/quiche/struct.Config.html#method.set_initial_max_stream_data_bidi_local
 [`set_initial_max_stream_data_bidi_remote()`]: https://docs.rs/quiche/latest/quiche/struct.Config.html#method.set_initial_max_stream_data_bidi_remote
 [`set_initial_max_stream_data_uni()`]: https://docs.rs/quiche/latest/quiche/struct.Config.html#method.set_initial_max_stream_data_uni
-[`with_boring_ssl_ctx_builder()`]: https://docs.quic.tech/quiche/struct.Config.html#method.with_boring_ssl_ctx_builder
 [`connect()`]: https://docs.quic.tech/quiche/fn.connect.html
 [`accept()`]: https://docs.quic.tech/quiche/fn.accept.html
 [`recv()`]: https://docs.quic.tech/quiche/struct.Connection.html#method.recv
