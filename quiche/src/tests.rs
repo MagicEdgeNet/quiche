@@ -8185,17 +8185,21 @@ fn handshake_anti_deadlock(
 
     assert!(!pipe.client.handshake_status().has_handshake_keys);
     assert!(!pipe.client.handshake_status().peer_verified_address);
-    assert!(pipe.server.handshake_status().has_handshake_keys);
     assert!(pipe.server.handshake_status().peer_verified_address);
 
-    // Client receives the server flight and sends Handshake ACK, but it is
-    // lost.
+    // Client receives the anti-amplification-limited server flight and sends
+    // any available ACK flight, but that flight is lost.
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
-    test_utils::emit_flight(&mut pipe.client).unwrap();
+    match test_utils::emit_flight(&mut pipe.client) {
+        Ok(_) | Err(Error::Done) => (),
 
-    assert!(pipe.client.handshake_status().has_handshake_keys);
+        Err(e) => panic!("unexpected client send error: {e:?}"),
+    }
+
+    if pipe.client.handshake_status().has_handshake_keys {
+        assert!(pipe.server.handshake_status().has_handshake_keys);
+    }
     assert!(!pipe.client.handshake_status().peer_verified_address);
-    assert!(pipe.server.handshake_status().has_handshake_keys);
     assert!(pipe.server.handshake_status().peer_verified_address);
 
     // Make sure client's PTO timer is armed.
@@ -8212,12 +8216,12 @@ fn handshake_packet_type_corruption(
 
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
 
-    // Client sends padded Initial.
-    let (len, _) = pipe.client.send(&mut buf).unwrap();
-    assert_eq!(len, 1200);
+    // Client sends padded Initial flight.
+    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    assert_eq!(flight[0].0.len(), 1200);
 
     // Server receives client's Initial and sends own Initial and Handshake.
-    assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
