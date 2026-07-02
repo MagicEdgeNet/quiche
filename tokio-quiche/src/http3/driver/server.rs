@@ -214,6 +214,8 @@ impl ServerHooks {
             .take_last_priority_update(stream_id)
             .ok()
             .map(|v| v.into());
+        let is_in_early_data = qconn.stream_received_in_early_data(stream_id)? ||
+            qconn.is_in_early_data();
 
         // Boost the priority of the stream until we write response headers via
         // process_write_frame(), which will set the desired priority. Since it
@@ -245,7 +247,7 @@ impl ServerHooks {
             .send(ServerH3Event::Headers {
                 incoming_headers: headers,
                 priority: latest_priority_update,
-                is_in_early_data: IsInEarlyData::new(qconn.is_in_early_data()),
+                is_in_early_data: IsInEarlyData::new(is_in_early_data),
             })
             .map_err(|_| H3ConnectionError::ControllerWentAway)?;
         driver.hooks.requests += 1;

@@ -1169,6 +1169,7 @@ fn streamio_mixed_actions(
     assert_eq!(pipe.advance(), Ok(()));
 
     assert!(!pipe.server.stream_finished(4));
+    assert_eq!(pipe.server.stream_received_in_early_data(4), Ok(false));
 
     let mut r = pipe.server.readable();
     assert_eq!(r.next(), Some(4));
@@ -1236,6 +1237,7 @@ fn zero_rtt(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
 
     assert_eq!(pipe.server_recv(&mut zrtt), Ok(zrtt.len()));
     assert!(pipe.server.is_in_early_data());
+    assert_eq!(pipe.server.stream_received_in_early_data(4), Ok(true));
 
     // 0-RTT stream data is readable.
     let mut r = pipe.server.readable();
@@ -1245,6 +1247,7 @@ fn zero_rtt(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     let mut b = [0; 15];
     assert_eq!(pipe.server.stream_recv(4, &mut b), Ok((12, true)));
     assert_eq!(&b[..12], b"hello, world");
+    assert_eq!(pipe.server.stream_received_in_early_data(4), Ok(true));
 }
 
 #[rstest]

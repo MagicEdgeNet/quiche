@@ -797,6 +797,9 @@ pub struct Stream<F: BufFactory = DefaultBufFactory> {
     /// Whether the stream can be flushed incrementally. Default is `true`.
     pub incremental: bool,
 
+    /// Whether a STREAM frame for this stream was received in 0-RTT.
+    pub(crate) received_in_early_data: bool,
+
     pub priority_key: Arc<StreamPriorityKey>,
 }
 
@@ -819,6 +822,7 @@ impl<F: BufFactory> Stream<F> {
             local,
             urgency: priority_key.urgency,
             incremental: priority_key.incremental,
+            received_in_early_data: false,
             priority_key,
         }
     }

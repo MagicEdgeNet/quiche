@@ -7717,6 +7717,22 @@ impl<F: BufFactory> Connection<F> {
         self.handshake.is_in_early_data()
     }
 
+    /// Returns true if the stream received any data in a 0-RTT packet.
+    ///
+    /// The result is sticky for the lifetime of the stream, so applications can
+    /// query it after reading from the stream. This is useful for associating
+    /// application-level events with 0-RTT stream data without sampling the
+    /// connection-level early data state.
+    #[inline]
+    pub fn stream_received_in_early_data(&self, stream_id: u64) -> Result<bool> {
+        let stream = self
+            .streams
+            .get(stream_id)
+            .ok_or(Error::InvalidStreamState(stream_id))?;
+
+        Ok(stream.received_in_early_data)
+    }
+
     /// Returns the early data reason for the connection.
     ///
     /// This status can be useful for logging and debugging. See [BoringSSL]
@@ -8578,6 +8594,7 @@ impl<F: BufFactory> Connection<F> {
                 let was_draining = stream.recv.is_draining();
 
                 stream.recv.write(data)?;
+                stream.received_in_early_data |= hdr.ty == Type::ZeroRTT;
 
                 if !was_readable && stream.is_readable() {
                     self.streams.insert_readable(&priority_key);
