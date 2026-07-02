@@ -65,6 +65,9 @@ async fn handle_0_rtt_request() {
 
     let context_clone = context.clone();
     let mut quic_settings = QuicSettings::default();
+    // This test asserts accepted 0-RTT request metadata. Stateless retry
+    // consumes the pre-validation 0-RTT flight before it can be accepted.
+    quic_settings.disable_client_ip_validation = true;
     quic_settings.enable_early_data = true;
     let (url, _) = start_server_with_settings(
         quic_settings,
@@ -125,10 +128,6 @@ async fn handle_0_rtt_request() {
             assert!(context.hosts_seen.contains(&"early.test.com".to_string()));
             assert!(context.hosts_seen.contains(&"test.com".to_string()));
             assert_eq!(context.requests_handled_count, 2);
-            // The rustls backend resumes the connection in this flow, but the
-            // request is delivered as 1-RTT until rustls 0-RTT acceptance is
-            // wired through completely.
-            #[cfg(feature = "boringssl-boring-crate")]
             assert!(context.did_recv_early_data_request);
         }
     }

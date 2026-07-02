@@ -239,17 +239,12 @@ pub fn connect_with_early_data(
         }
     }
 
-    while let Err(e) = socket.send_to(&out[..write], send_info.to) {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            log::debug!(
-                "{} -> {}: send() would block",
-                socket.local_addr().unwrap(),
-                send_info.to
-            );
-            continue;
-        }
+    send_packet(&socket, &out[..write], send_info.to)?;
 
-        return Err(ClientError::Other(format!("send() failed: {e:?}")));
+    if conn.is_in_early_data() {
+        // Early actions are queued before the event loop starts, so flush them
+        // while 0-RTT packet keys are still active.
+        flush_pending_packets(&socket, &mut conn, &mut out)?;
     }
 
     let app_data_start = std::time::Instant::now();
@@ -425,52 +420,7 @@ pub fn connect_with_early_data(
 
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
-        let sockets = vec![&socket];
-
-        for socket in sockets {
-            let local_addr = socket.local_addr().unwrap();
-
-            for peer_addr in conn.paths_iter(local_addr) {
-                loop {
-                    let (write, send_info) = match conn.send_on_path(
-                        &mut out,
-                        Some(local_addr),
-                        Some(peer_addr),
-                    ) {
-                        Ok(v) => v,
-
-                        Err(quiche::Error::Done) => {
-                            break;
-                        },
-
-                        Err(e) => {
-                            log::error!(
-                                "{local_addr} -> {peer_addr}: send failed: {e:?}"
-                            );
-
-                            conn.close(false, 0x1, b"fail").ok();
-                            break;
-                        },
-                    };
-
-                    if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            log::debug!(
-                                "{} -> {}: send() would block",
-                                local_addr,
-                                send_info.to
-                            );
-                            break;
-                        }
-
-                        return Err(ClientError::Other(format!(
-                            "{} -> {}: send() failed: {:?}",
-                            local_addr, send_info.to, e
-                        )));
-                    }
-                }
-            }
-        }
+        flush_pending_packets(&socket, &mut conn, &mut out)?;
 
         if conn.is_closed() {
             log::info!(
@@ -498,6 +448,78 @@ pub fn connect_with_early_data(
         path_stats: conn.path_stats().collect(),
         conn_close_details: ConnectionCloseDetails::new(&conn),
     })
+}
+
+fn send_packet(
+    socket: &mio::net::UdpSocket, packet: &[u8], peer_addr: std::net::SocketAddr,
+) -> std::result::Result<(), ClientError> {
+    while let Err(e) = socket.send_to(packet, peer_addr) {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            log::debug!(
+                "{} -> {}: send() would block",
+                socket.local_addr().unwrap(),
+                peer_addr
+            );
+            continue;
+        }
+
+        return Err(ClientError::Other(format!(
+            "{} -> {}: send() failed: {:?}",
+            socket.local_addr().unwrap(),
+            peer_addr,
+            e
+        )));
+    }
+
+    Ok(())
+}
+
+fn flush_pending_packets(
+    socket: &mio::net::UdpSocket, conn: &mut quiche::Connection, out: &mut [u8],
+) -> std::result::Result<(), ClientError> {
+    let local_addr = socket.local_addr().unwrap();
+
+    for peer_addr in conn.paths_iter(local_addr) {
+        loop {
+            let (write, send_info) =
+                match conn.send_on_path(out, Some(local_addr), Some(peer_addr)) {
+                    Ok(v) => v,
+
+                    Err(quiche::Error::Done) => break,
+
+                    Err(e) => {
+                        log::error!(
+                            "{local_addr} -> {peer_addr}: send failed: {e:?}"
+                        );
+
+                        conn.close(false, 0x1, b"fail").ok();
+                        break;
+                    },
+                };
+
+            match socket.send_to(&out[..write], send_info.to) {
+                Ok(_) => (),
+
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    log::debug!(
+                        "{} -> {}: send() would block",
+                        local_addr,
+                        send_info.to
+                    );
+                    break;
+                },
+
+                Err(e) => {
+                    return Err(ClientError::Other(format!(
+                        "{} -> {}: send() failed: {:?}",
+                        local_addr, send_info.to, e
+                    )));
+                },
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn check_duration_and_do_actions(
